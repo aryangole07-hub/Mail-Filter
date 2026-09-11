@@ -1025,6 +1025,74 @@ check("stopwords alone do not match everything",
       qa.select_context(qmails, "the is a of") == [])
 
 
+section("Alerts - the evening reminder about tomorrow")
+
+import alerts as al
+from datetime import date as _d
+
+ad = tempfile.mkdtemp()
+al.STORE_FILE = os.path.join(ad, "digest_store.json")
+al.FEEDBACK_FILE = os.path.join(ad, "feedback.json")
+al.STATE_FILE = os.path.join(ad, "alerts_state.json")
+
+json.dump({"mails": [
+    {"id": "e1", "subject": "FoFA Quiz 2", "category": "Classes",
+     "events": [{"title": "FoFA Quiz 2", "date": "2026-09-20",
+                 "start_time": "18:15", "kind": "exam", "location": "F207"}]},
+    {"id": "e2", "subject": "Junk", "category": "Ignore",
+     "events": [{"title": "Sale ends", "date": "2026-09-20",
+                 "start_time": "", "kind": "other"}]},
+    {"id": "e3", "subject": "Reported thing", "category": "Other",
+     "events": [{"title": "Club meet", "date": "2026-09-20",
+                 "start_time": "17:00", "kind": "event"}]},
+]}, open(al.STORE_FILE, "w", encoding="utf-8"))
+json.dump({"reports": [{"id": "e3"}], "important": []},
+          open(al.FEEDBACK_FILE, "w", encoding="utf-8"))
+
+got = al.mail_events_on(_d(2026, 9, 20))
+titles = [e["title"] for e in got]
+check("an event from shown mail is included", "FoFA Quiz 2" in titles, str(titles))
+check("an event from Ignored mail is left out", "Sale ends" not in titles, str(titles))
+check("an event from reported mail is left out", "Club meet" not in titles, str(titles))
+
+# ...unless the mail can never be hidden.
+json.dump({"reports": [{"id": "e3"}], "important": [{"id": "e3"}]},
+          open(al.FEEDBACK_FILE, "w", encoding="utf-8"))
+check("marking a reported mail important brings its event back",
+      "Club meet" in [e["title"] for e in al.mail_events_on(_d(2026, 9, 20))])
+
+fm, ft = al.agenda(_d(2026, 9, 20))       # a Sunday - no classes
+check("a weekend agenda has no classes", ft == [])
+title, body = al.compose(_d(2026, 9, 20), fm, ft)
+check("an exam leads the notification title", "FoFA Quiz 2" in title, title)
+check("the body carries the time", "18:15" in body, body)
+check("the body carries the location", "F207" in body, body)
+
+mon_m, mon_t = al.agenda(_d(2026, 9, 14))
+t2, b2 = al.compose(_d(2026, 9, 14), mon_m, mon_t)
+check("a weekday with only classes still notifies", t2 is not None)
+check("classes are summarised, not listed one by one",
+      "5 classes" in b2, b2)
+
+check("an empty day produces no notification",
+      al.compose(_d(2026, 9, 21), [], [])[0] is None)
+
+check("the reminder is not repeated for the same day",
+      (al.remember("2026-09-20"), al.already_sent("2026-09-20"))[1])
+check("a different day is still announced", not al.already_sent("2026-09-21"))
+
+many = [{"title": "E%d" % i, "date": "2026-09-20", "start_time": "10:00"}
+        for i in range(20)]
+_, big = al.compose(_d(2026, 9, 20), many, [])
+check("a busy day is truncated rather than flooding the popup",
+      len(big.splitlines()) <= al.MAX_LINES + 1, str(len(big.splitlines())))
+check("truncation says how many were left out", "more" in big)
+
+al.STORE_FILE = os.path.join(ad, "gone.json")
+check("a missing store does not crash the reminder",
+      al.mail_events_on(_d(2026, 9, 20)) == [])
+
+
 section("Viewer - safety of the original-message view")
 
 vspec = importlib.util.spec_from_file_location(

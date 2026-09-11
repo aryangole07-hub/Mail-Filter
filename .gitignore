@@ -9,6 +9,7 @@ token.json
 last_run.json
 digest_store.json
 feedback.json
+alerts_state.json
 *.tmp
 digest.log
 digest.log.1
@@ -17,3 +18,8 @@ digest.log.1
 .venv/
 __pycache__/
 *.pyc
+
+# Build output. dist/setup.exe embeds credentials.json - never publish it.
+dist/
+build/
+*.spec
