@@ -386,7 +386,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/calendar":
             params = urllib.parse.parse_qs(parsed.query)
-            today = datetime.now(timezone.utc).date()
+            today = datetime.now().astimezone().date()  # calendar day, local
             try:
                 start = datetime.strptime(
                     params.get("from", [""])[0], "%Y-%m-%d").date()

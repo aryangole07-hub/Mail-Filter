@@ -77,12 +77,26 @@ def agenda(target):
     return from_mail, from_timetable
 
 
-def compose(target, from_mail, from_timetable):
+def relative_label(target, today=None):
+    """"Tomorrow", "Today", or the weekday - whatever is true for this date."""
+    today = today or datetime.now().astimezone().date()
+    delta = (target - today).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    if delta == -1:
+        return "Yesterday"
+    return target.strftime("%A")
+
+
+def compose(target, from_mail, from_timetable, today=None):
     """(title, body) for the notification, or (None, None) if nothing to say."""
     if not from_mail and not from_timetable:
         return None, None
 
     day = target.strftime("%A %d %b")
+    label = relative_label(target, today)
     lines = []
 
     for event in from_mail[:MAX_LINES]:
@@ -102,12 +116,12 @@ def compose(target, from_mail, from_timetable):
 
     urgent = [e for e in from_mail if e.get("kind") in ("exam", "deadline")]
     if urgent:
-        title = "Tomorrow ({}): {}".format(day, urgent[0]["title"])
+        title = "{} ({}): {}".format(label, day, urgent[0]["title"])
     elif from_mail:
-        title = "Tomorrow ({}): {} thing{} on".format(
-            day, len(from_mail), "" if len(from_mail) == 1 else "s")
+        title = "{} ({}): {} thing{} on".format(
+            label, day, len(from_mail), "" if len(from_mail) == 1 else "s")
     else:
-        title = "Tomorrow ({})".format(day)
+        title = "{} ({})".format(label, day)
 
     return title, "\n".join(lines)
 
@@ -170,7 +184,10 @@ def main():
                         help="Notify even if the same day was already announced.")
     args = parser.parse_args()
 
-    target = (datetime.now(timezone.utc) + timedelta(days=args.days)).date()
+    # Local time, not UTC. "Tomorrow" is a calendar word: at UTC+5:30 a run
+    # after midnight would otherwise report today as tomorrow, which is
+    # exactly when a student is most likely to be looking.
+    target = (datetime.now().astimezone() + timedelta(days=args.days)).date()
     from_mail, from_timetable = agenda(target)
     title, body = compose(target, from_mail, from_timetable)
 

@@ -92,7 +92,7 @@ def score_mail(mail, question_words, now):
 
 def select_context(mails, question, limit=MAX_CONTEXT_MAILS, now=None):
     """The mails most likely to contain the answer, best first."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now().astimezone()
     words = keywords(question)
     scored = []
     for mail in mails:
@@ -151,7 +151,7 @@ Question: {question}""".format(today=today, emails=joined,
 
 def ask(client, model, mails, question, now=None, debug=False):
     """Answer a question from the store. Always returns a dict, never raises."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now().astimezone()
     question = (question or "").strip()
     if not question:
         return {"ok": False, "answer": "Ask me something about your mail.",

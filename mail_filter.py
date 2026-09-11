@@ -363,7 +363,12 @@ def _list_message_ids(service, since_dt, max_results):
         if not page_token or len(ids) == before:
             break
 
-    return ids[:max_results]
+    # More mail matched than we were allowed to fetch. The caller MUST NOT
+    # advance the last-run marker in that case: Gmail returns newest first, so
+    # the ids past the cap are the OLDEST unseen mail, and moving the marker
+    # would bury them permanently.
+    truncated = len(ids) > max_results or bool(page_token)
+    return ids[:max_results], truncated
 
 
 def _metadata_request(service, message_id):
@@ -498,13 +503,13 @@ def _fetch_metadata(service, message_ids):
             f"NOT in this digest. First reason: {_describe(skipped[0][1])}",
             file=sys.stderr,
         )
-        if len(skipped) > 1:
-            print(
-                "  Re-run to pick them up; nothing has been marked as seen.",
-                file=sys.stderr,
-            )
+        print(
+            "  The last-run marker will not move, so the next run re-reads "
+            "them.",
+            file=sys.stderr,
+        )
 
-    return metadata
+    return metadata, [message_id for message_id, _ in skipped]
 
 
 def _decode_part(data):
@@ -547,8 +552,23 @@ def extract_bodies(payload):
 
 
 def fetch_emails_since(service, since_dt, max_results):
-    message_ids = _list_message_ids(service, since_dt, max_results)
-    metadata = _fetch_metadata(service, message_ids)
+    """(emails, complete). `complete` is False if anything was left behind.
+
+    The caller uses `complete` to decide whether it is safe to move the
+    last-run marker forward. This is the single most important return value
+    in the program: getting it wrong loses mail silently.
+    """
+    message_ids, truncated = _list_message_ids(service, since_dt, max_results)
+    metadata, skipped = _fetch_metadata(service, message_ids)
+
+    if truncated:
+        print(
+            f"Warning: more than {max_results} messages matched, so the "
+            "oldest ones were not read. The last-run marker will not move, so "
+            f"nothing is lost - re-run with --max {max_results * 4} to catch "
+            "up in one go.",
+            file=sys.stderr,
+        )
 
     emails = []
     for message_id in message_ids:
@@ -585,7 +605,7 @@ def fetch_emails_since(service, since_dt, max_results):
         )
 
     emails.sort(key=lambda e: e["received_at"])
-    return emails
+    return emails, not (truncated or skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -1228,7 +1248,11 @@ def sender_domain_address(raw_from):
     return match.group(0).lower() if match else ""
 
 
-STORE_RETENTION_DAYS = 30
+# The viewer is meant to show everything, not a rolling month. A year of
+# campus mail with bodies is a few tens of megabytes, which is nothing, and
+# dropping mail the student might still search for is the wrong default.
+STORE_RETENTION_DAYS = 365
+STORE_MAX_MAILS = 5000  # a ceiling so the file cannot grow without bound
 
 
 def load_store():
@@ -1254,6 +1278,14 @@ def save_store(emails, id_to_category, summaries):
     existing = {m.get("id"): m for m in store["mails"] if isinstance(m, dict)}
 
     for e in emails:
+        # A re-read of the same window must never destroy work already done.
+        # An Ignored mail is not summarised, and --no-events skips extraction,
+        # so overwriting blindly would blank a summary or drop a calendar
+        # entry that a previous run had paid for.
+        prior = existing.get(e["id"]) or {}
+        summary = summaries.get(e["id"]) or prior.get("summary") or ""
+        events = e.get("events") or prior.get("events") or []
+
         existing[e["id"]] = {
             "id": e["id"],
             "subject": e.get("subject") or "(no subject)",
@@ -1264,7 +1296,7 @@ def save_store(emails, id_to_category, summaries):
             "date": e.get("date") or "",
             "received_at": e["received_at"].isoformat(),
             "category": id_to_category.get(e["id"], FALLBACK_CATEGORY),
-            "summary": summaries.get(e["id"], ""),
+            "summary": summary,
             "snippet": e.get("snippet") or "",
             "body_html": e.get("body_html") or "",
             "body_text": e.get("body_text") or "",
@@ -1275,7 +1307,7 @@ def save_store(emails, id_to_category, summaries):
             # even if the sender has been reported.
             "absolute": bool(e.get("absolute")),
             "courses": e.get("courses") or [],
-            "events": e.get("events") or [],
+            "events": events,
         }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=STORE_RETENTION_DAYS)
@@ -1288,6 +1320,8 @@ def save_store(emails, id_to_category, summaries):
         if received >= cutoff:
             mails.append(m)
     mails.sort(key=lambda m: m["received_at"], reverse=True)
+    if len(mails) > STORE_MAX_MAILS:
+        mails = mails[:STORE_MAX_MAILS]  # newest kept
 
     _write_atomic(
         STORE_FILE,
@@ -1360,8 +1394,10 @@ def main():
     parser.add_argument(
         "--max",
         type=int,
-        default=100,
-        help="Max emails to fetch from Gmail's search. Default: 100.",
+        default=400,
+        help="Max emails to fetch from Gmail's search. Default: 400. Going "
+             "over this does not lose mail - the run is marked incomplete and "
+             "the next one picks up where it stopped.",
     )
     parser.add_argument(
         "--no-save",
@@ -1417,11 +1453,16 @@ def main():
     run_started_at = datetime.now(timezone.utc)
 
     gmail = get_gmail_service()
-    emails = fetch_emails_since(gmail, since_dt, max_results=args.max)
+    emails, complete = fetch_emails_since(gmail, since_dt, max_results=args.max)
+
+    # One rule, applied in both places below: the marker only moves when every
+    # message in the window was actually read. Anything else risks marking
+    # unread mail as seen, which is the one failure this program must not have.
+    may_advance = complete and not args.no_save and not args.backfill
 
     if not emails:
         print("No new emails since last run.")
-        if not args.no_save and not args.backfill:
+        if may_advance:
             save_last_run(run_started_at)
         return
 
@@ -1448,17 +1489,30 @@ def main():
             e["courses"] = courses.tag_courses(
                 e.get("subject", ""), readable_body(e), e.get("from", ""))
 
-        summaries = summarize_emails(client, shown)
+        # Skip anything already summarised in a previous run. Re-reads are
+        # normal now (an incomplete run deliberately repeats its window), and
+        # a re-summarise costs seconds per mail for an identical result.
+        done = {m.get("id"): m for m in load_store()["mails"]
+                if isinstance(m, dict)}
+        fresh = [e for e in shown if not (done.get(e["id"]) or {}).get("summary")]
+        if len(fresh) < len(shown):
+            print(f"  {len(shown) - len(fresh)} already summarised; skipping.",
+                  file=sys.stderr)
+        summaries = summarize_emails(client, fresh)
 
         if not args.no_events:
-            now = datetime.now(timezone.utc)
-            for position, e in enumerate(shown, start=1):
-                print(f"  reading dates {position}/{len(shown)}...",
+            # Local: the model resolves "tomorrow" and "this Friday" against
+            # this, and those are calendar words, not UTC instants.
+            now = datetime.now().astimezone()
+            needs_dates = [e for e in shown
+                           if "events" not in (done.get(e["id"]) or {})]
+            for position, e in enumerate(needs_dates, start=1):
+                print(f"  reading dates {position}/{len(needs_dates)}...",
                       end=chr(13), file=sys.stderr, flush=True)
                 e["events"] = events_mod.extract_events(
                     client, e, readable_body(e), CLASSIFY_MODEL,
                     e["received_at"], today=now, debug=DEBUG)
-            if shown:
+            if needs_dates:
                 print(" " * 40, end=chr(13), file=sys.stderr)
     finally:
         # Free the VRAM as soon as the classifying is done - this box has other
@@ -1474,8 +1528,14 @@ def main():
     # next run picks the same emails up again instead of losing them. A
     # backfill deliberately does not touch it: re-reading history should not
     # convince the next run that today's mail has already been seen.
-    if not args.no_save and not args.backfill:
+    if may_advance:
         save_last_run(run_started_at)
+    elif not complete:
+        print(
+            "Note: this run was incomplete, so the last-run marker was left "
+            "alone. The next run will re-read this window.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ No network, no credentials, no API spend.
 import json
 import base64
 import importlib.util
+import io
 import math
 import os
 import re
@@ -235,7 +236,7 @@ class FakeClassifier:
 
 since = now - timedelta(hours=24)
 svc = FakeService()
-emails = m.fetch_emails_since(svc, since, 100)
+emails, complete = m.fetch_emails_since(svc, since, 100)
 by_id = {e["id"]: e for e in emails}
 
 
@@ -257,21 +258,42 @@ section("Gmail: window, ordering, batching, pagination")
 check("stale email excluded", "m5" not in by_id)
 check("sorted oldest first", [e["id"] for e in emails] == ["m4", "m3", "m2", "m1"])
 check("used the batch endpoint", svc.batch_count >= 1)
-e_nb = m.fetch_emails_since(FakeService(batching=False), since, 100)
+e_nb, _ = m.fetch_emails_since(FakeService(batching=False), since, 100)
 check("serial fallback matches batch result",
       [e["id"] for e in e_nb] == [e["id"] for e in emails])
-e_x = m.fetch_emails_since(FakeService(batch_explodes=True), since, 100)
+e_x, _ = m.fetch_emails_since(FakeService(batch_explodes=True), since, 100)
 check("batch failure degrades to serial",
       [e["id"] for e in e_x] == [e["id"] for e in emails])
-e_b = m.fetch_emails_since(FakeService(broken_ids=["m2"]), since, 100)
+e_b, complete_b = m.fetch_emails_since(FakeService(broken_ids=["m2"]), since, 100)
 check("one unfetchable message skipped, run survives",
       [e["id"] for e in e_b] == ["m4", "m3", "m1"])
 svc_p = FakeService(paginate=True)
-check("paged through every result",
-      len(m.fetch_emails_since(svc_p, since, 100)) == 4)
+paged, _ = m.fetch_emails_since(svc_p, since, 100)
+check("paged through every result", len(paged) == 4)
 svc_c = FakeService(paginate=True)
 m.fetch_emails_since(svc_c, since, 2)
 check("--max honoured across pages", len(svc_c.get_calls) <= 2)
+
+section("RECALL - an incomplete run must never mark mail as seen")
+
+check("a clean run reports itself complete", complete is True)
+check("a run that skipped a message reports itself INCOMPLETE",
+      complete_b is False)
+
+ids_t, trunc_t = m._list_message_ids(FakeService(paginate=True), since, 2)
+check("hitting --max is reported as truncation", trunc_t is True)
+ids_f, trunc_f = m._list_message_ids(FakeService(), since, 100)
+check("a full read is not reported as truncation", trunc_f is False)
+
+_, complete_t = m.fetch_emails_since(FakeService(paginate=True), since, 2)
+check("a truncated fetch reports itself INCOMPLETE", complete_t is False)
+
+meta, skipped = m._fetch_metadata(FakeService(broken_ids=["m2"]),
+                                  ["m1", "m2", "m3"])
+check("the fetcher names what it could not get", skipped == ["m2"], str(skipped))
+check("the fetcher still returns what it did get", set(meta) == {"m1", "m3"})
+check("nothing skipped means an empty skip list",
+      m._fetch_metadata(FakeService(), ["m1"])[1] == [])
 check("page size never exceeds Gmail's 500 cap",
       all(c[1] <= 500 for c in svc_c.list_calls))
 check("after: steps back a day",
@@ -1061,6 +1083,30 @@ json.dump({"reports": [{"id": "e3"}], "important": [{"id": "e3"}]},
 check("marking a reported mail important brings its event back",
       "Club meet" in [e["title"] for e in al.mail_events_on(_d(2026, 9, 20))])
 
+section("RECALL - calendar days are LOCAL days, not UTC days")
+
+check("'tomorrow' is relative to the local date",
+      al.relative_label(_d(2026, 9, 13), today=_d(2026, 9, 12)) == "Tomorrow")
+check("'today' is named as today",
+      al.relative_label(_d(2026, 9, 12), today=_d(2026, 9, 12)) == "Today")
+check("a far date is named by weekday, not called tomorrow",
+      al.relative_label(_d(2026, 9, 18), today=_d(2026, 9, 12)) == "Friday")
+check("--days 0 does not claim to be tomorrow",
+      al.compose(_d(2026, 9, 20),
+                 [{"title": "X", "date": "2026-09-20", "start_time": "10:00"}],
+                 [], today=_d(2026, 9, 20))[0].startswith("Today"))
+
+# The bug this guards: at UTC+5:30, between midnight and 05:30 local the UTC
+# date is still yesterday, so a UTC-based "tomorrow" pointed at today.
+_utc_today = datetime.now(timezone.utc).date()
+_local_today = datetime.now().astimezone().date()
+check("the reminder uses local dates even when UTC disagrees",
+      "datetime.now().astimezone()" in io.open(
+          os.path.join(os.path.dirname(os.path.abspath(__file__)), "alerts.py"),
+          encoding="utf-8").read())
+check("the two calendars can legitimately differ (documenting why it matters)",
+      isinstance(_utc_today, _d) and isinstance(_local_today, _d))
+
 fm, ft = al.agenda(_d(2026, 9, 20))       # a Sunday - no classes
 check("a weekend agenda has no classes", ft == [])
 title, body = al.compose(_d(2026, 9, 20), fm, ft)
@@ -1091,6 +1137,53 @@ check("truncation says how many were left out", "more" in big)
 al.STORE_FILE = os.path.join(ad, "gone.json")
 check("a missing store does not crash the reminder",
       al.mail_events_on(_d(2026, 9, 20)) == [])
+
+
+section("RECALL - a re-read must not destroy work already done")
+
+sd = tempfile.mkdtemp()
+orig_store = m.STORE_FILE
+m.STORE_FILE = os.path.join(sd, "digest_store.json")
+
+e1 = {"id": "s1", "subject": "FoFA Quiz", "from": "u@bits.ac.in",
+      "snippet": "", "received_at": datetime.now(timezone.utc),
+      "events": [{"title": "Quiz", "date": "2026-11-04", "start_time": "18:15"}],
+      "courses": ["ECON F212"]}
+m.save_store([e1], {"s1": "Classes"}, {"s1": "A real summary."})
+check("first run stores the summary",
+      m.load_store()["mails"][0]["summary"] == "A real summary.")
+check("first run stores the events", len(m.load_store()["mails"][0]["events"]) == 1)
+
+# The same mail comes round again, this time with nothing new computed.
+e2 = dict(e1); e2.pop("events")
+m.save_store([e2], {"s1": "Classes"}, {})
+again = m.load_store()["mails"][0]
+check("a re-read keeps the existing summary",
+      again["summary"] == "A real summary.", again["summary"])
+check("a re-read keeps the existing events", len(again["events"]) == 1, str(again))
+check("a re-read does not duplicate the mail", len(m.load_store()["mails"]) == 1)
+
+# A newly computed summary should still win.
+m.save_store([e2], {"s1": "Classes"}, {"s1": "A better summary."})
+check("a fresh summary replaces the old one",
+      m.load_store()["mails"][0]["summary"] == "A better summary.")
+
+old_mail = {"id": "old", "subject": "Ancient", "from": "x@y.z", "snippet": "",
+            "received_at": datetime.now(timezone.utc) - timedelta(days=400)}
+m.save_store([old_mail], {"old": "Other"}, {})
+check("mail beyond the retention window is dropped",
+      "old" not in [x["id"] for x in m.load_store()["mails"]])
+check("a year of mail is kept, not a month", m.STORE_RETENTION_DAYS >= 365)
+check("the store has a hard ceiling so it cannot grow forever",
+      m.STORE_MAX_MAILS > 0)
+
+recent = {"id": "r", "subject": "Recent", "from": "x@y.z", "snippet": "",
+          "received_at": datetime.now(timezone.utc) - timedelta(days=200)}
+m.save_store([recent], {"r": "Other"}, {})
+check("mail from six months ago is still kept",
+      "r" in [x["id"] for x in m.load_store()["mails"]])
+
+m.STORE_FILE = orig_store
 
 
 section("Viewer - safety of the original-message view")
