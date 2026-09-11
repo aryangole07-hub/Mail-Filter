@@ -10,6 +10,10 @@ last_run.json
 digest_store.json
 feedback.json
 alerts_state.json
+*.backup
+*.bak
+viewer.out
+backfill.log
 *.tmp
 digest.log
 digest.log.1
