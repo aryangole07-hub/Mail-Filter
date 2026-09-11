@@ -163,6 +163,29 @@ CLASSIFICATION_SCHEMA = {
 # only costs one extra line in the digest, a false negative costs a missed
 # exam, so the terms here lean campus-specific rather than broad ("test" alone
 # would match every marketing mail ever written).
+# ---------------------------------------------------------------------------
+# The absolute tier: anything about marks.
+# ---------------------------------------------------------------------------
+# This is the one rule with no exceptions anywhere in the program. Mail that
+# mentions marks, grades or results is shown even if the model called it
+# Ignore AND the student has reported that sender as junk. Every other
+# never-hide rule can be overridden by an explicit Report; this one cannot,
+# because a missed grade notice is not recoverable by scrolling a folder.
+MARKS_PATTERN = re.compile(
+    r"\b("
+    r"marks?|mark-?sheets?|marks\s+sheet|grade-?sheets?|"
+    r"grades?|grading|graded|cgpa|"
+    r"sgpa|gpa|score[ds]?|scores|"
+    r"results?|result-?sheet|evaluation|re-?evaluation|"
+    r"revaluation|moderation|tabulation|percentile|"
+    r"rank\s+list|ranks?|out\s+of\s+\d+|awarded|"
+    r"award\s+of\s+grades?|transcripts?|academic\s+record|report\s+card|"
+    r"midsem\s+marks?|compre\s+marks?|quiz\s+marks?|answer\s+script|"
+    r"answer\s+sheet|paper\s+show"
+    r")\b",
+    re.IGNORECASE,
+)
+
 NEVER_HIDE_PATTERN = re.compile(
     r"\b("
     r"midsems?|compres?|comprehensive|exit\s+test|"
@@ -179,7 +202,7 @@ NEVER_HIDE_PATTERN = re.compile(
     r"no\s+dues|forms?|portal|erp|"
     r"circular|notice|urgent|immediate|"
     r"mandatory|compulsory|reminder|today|"
-    r"tomorrow|last\s+chance|expires"
+    r"tomorrow|last\s+chance|expires?"
     r")\b",
     re.IGNORECASE,
 )
@@ -571,6 +594,9 @@ Everything else - anything from the university, anything mentioning a date,
 deadline, exam, form, fee or room, anything replying to a thread the student
 started, and anything you are even slightly unsure about - goes to Classes,
 Fests or Other so the student sees it.
+
+Anything mentioning marks, grades, results, CGPA, a grade sheet, an answer
+script or a paper show is ALWAYS Classes. Never Ignore. No exceptions.
 
 A wrong Ignore means a missed exam. A wrong Other means one extra line to
 skim. These costs are not close, so when in doubt, show it.
@@ -1013,6 +1039,16 @@ def apply_safety_net(emails, id_to_category, feedback=None):
 
         subject_norm = " ".join((e.get("subject") or "").lower().split())
         address = sender_domain_address(e.get("from"))
+        haystack_all = f"{e.get('subject', '')} {e.get('snippet', '')}"
+
+        # Absolute tier, checked before anything that could suppress it -
+        # including the student's own Report. See MARKS_PATTERN.
+        if MARKS_PATTERN.search(haystack_all):
+            id_to_category[e["id"]] = "Classes"
+            e["rescue_reason"] = "it mentions marks or grades"
+            e["absolute"] = True
+            rescued.append(e)
+            continue
 
         # The user has explicitly said this sender or this exact subject is
         # not important. Their judgement beats every rule below - otherwise
@@ -1091,6 +1127,9 @@ def save_store(emails, id_to_category, summaries):
             "institution": is_institution_mail(e),
             "rescued": bool(e.get("rescue_reason")),
             "rescue_reason": e.get("rescue_reason", ""),
+            # Marks mail. The viewer must never file this under Filtered,
+            # even if the sender has been reported.
+            "absolute": bool(e.get("absolute")),
         }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=STORE_RETENTION_DAYS)

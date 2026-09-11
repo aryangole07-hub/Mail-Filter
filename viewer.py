@@ -122,7 +122,10 @@ def mails_for_ui():
             "institution": bool(m.get("institution")),
             "rescued": bool(m.get("rescued")),
             "rescue_reason": m.get("rescue_reason") or "",
-            "reported": m["id"] in reported,
+            "absolute": bool(m.get("absolute")),
+            # A reported mail is hidden from the main list - unless it is
+            # marks mail, which nothing is allowed to hide.
+            "reported": m["id"] in reported and not m.get("absolute"),
             "has_body": bool(m.get("body_html") or m.get("body_text")),
         })
     return {"generated_at": store.get("generated_at"), "mails": out}
@@ -408,7 +411,7 @@ function when(iso, fallback){
 function visible(){
   const q = QUERY.trim().toLowerCase();
   return MAILS.filter(m => {
-    const isFiltered = m.category === "Ignore" || m.reported;
+    const isFiltered = (m.category === "Ignore" || m.reported) && !m.absolute;
     if(FILTER === "filtered"){ if(!isFiltered) return false; }
     else if(FILTER === "all"){ if(isFiltered) return false; }
     else { if(isFiltered || m.category !== FILTER) return false; }
@@ -420,7 +423,7 @@ function visible(){
 function counts(){
   const c = {all:0, Classes:0, Fests:0, Other:0, filtered:0};
   for(const m of MAILS){
-    if(m.category === "Ignore" || m.reported){ c.filtered++; continue; }
+    if((m.category === "Ignore" || m.reported) && !m.absolute){ c.filtered++; continue; }
     c.all++;
     if(c[m.category] !== undefined) c[m.category]++;
   }
@@ -435,7 +438,9 @@ function card(m, i){
   const summary = m.summary
     ? `<p class="summary">${esc(m.summary)}</p>`
     : `<p class="summary empty">${esc(m.snippet || "No summary available — open the original.")}</p>`;
-  const rescue = m.rescued
+  const rescue = m.absolute
+    ? `<span class="badge rescue" title="This mentions marks or grades, so it is always shown and cannot be hidden by a report">marks</span>`
+    : m.rescued
     ? `<span class="badge rescue" title="Kept visible because ${esc(m.rescue_reason)}">shielded</span>` : "";
   const reported = m.reported
     ? `<span class="badge rescue" title="You reported this as not important">reported</span>` : "";
@@ -450,7 +455,7 @@ function card(m, i){
     ${summary}
     <div class="actions">
       <button class="btn primary" data-act="open">Original</button>
-      <button class="btn ghost" data-act="report">${m.reported ? "Not junk" : "Report"}</button>
+      <button class="btn ghost" data-act="report"${m.absolute ? ' disabled title="Marks mail is always shown"' : ""}>${m.reported ? "Not junk" : "Report"}</button>
     </div>`;
   el.querySelector('[data-act="open"]').onclick = () => openOriginal(m);
   el.querySelector('[data-act="report"]').onclick = e => report(m, el, e.currentTarget);

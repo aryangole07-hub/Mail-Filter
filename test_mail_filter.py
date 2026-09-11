@@ -483,6 +483,53 @@ mpr = {"r1": "Ignore"}
 m.apply_safety_net(reply, mpr)
 check("a reply to your own thread is never hidden", mpr["r1"] != "Ignore")
 
+section("ABSOLUTE - anything about marks always shows, no exceptions")
+
+MARKS_SUBJECTS = [
+    "Midsem marks uploaded", "Your CGPA has been updated",
+    "Grade sheet released", "Result declared for Compre",
+    "Answer script viewing on Monday", "Paper show on Friday",
+    "SGPA correction notice", "Marks tabulation error",
+    "Revaluation results out", "Report card available",
+    "Quiz marks are up", "Transcript ready for collection",
+    "Moderation of grades complete", "You scored 82 out of 100",
+]
+for subj in MARKS_SUBJECTS:
+    mp = {"k": "Ignore"}
+    m.apply_safety_net([{"id": "k", "subject": subj, "snippet": "",
+                         "from": "random@outsider.com"}], mp)
+    check(f"marks mail always shown: {subj!r}", mp["k"] == "Classes", str(mp))
+
+# The point of the tier: even the student's own Report cannot bury it.
+heavy = {"senders": {"exams@hyderabad.bits-pilani.ac.in": 99},
+         "subjects": {"midsem marks uploaded"}}
+mp = {"k": "Ignore"}
+e = {"id": "k", "subject": "Midsem marks uploaded", "snippet": "",
+     "from": "exams@hyderabad.bits-pilani.ac.in"}
+resc = m.apply_safety_net([e], mp, heavy)
+check("a reported SENDER cannot hide marks mail", mp["k"] == "Classes", str(mp))
+check("a reported SUBJECT cannot hide marks mail", mp["k"] == "Classes", str(mp))
+check("marks rescues are flagged absolute", resc and resc[0].get("absolute") is True)
+check("marks rescues say why", resc and "marks" in resc[0]["rescue_reason"])
+
+# It must still not swallow the whole inbox.
+for subj in ["50% OFF sitewide", "Your food order is on the way",
+             "Movie screening tonight", "Newsletter: September edition"]:
+    mp = {"k": "Ignore"}
+    m.apply_safety_net([{"id": "k", "subject": subj, "snippet": "",
+                         "from": "ads@shop.com"}], mp)
+    check(f"ordinary junk is not force-shown by the marks rule: {subj!r}",
+          mp["k"] == "Ignore", str(mp))
+
+check("the marks pattern has no stray control characters",
+      not any(ord(c) < 32 for c in m.MARKS_PATTERN.pattern))
+check("the never-hide pattern has no stray control characters",
+      not any(ord(c) < 32 for c in m.NEVER_HIDE_PATTERN.pattern))
+check("the model is told marks are always Classes",
+      "marks" in m.build_batch_prompt(emails[:1]).lower()
+      and "no exceptions" in m.build_batch_prompt(emails[:1]).lower())
+
+
 section("RECALL - Report feedback, and only that, can re-hide mail")
 
 fb = {"senders": {"raf@hyderabad.bits-pilani.ac.in": 1}, "subjects": set()}
@@ -692,6 +739,24 @@ check("corrupt feedback falls back instead of crashing",
 open(v.STORE_FILE, "w", encoding="utf-8").write("[]")
 check("a store that is not the expected shape reads as empty",
       v.load_store()["mails"] == [])
+
+json.dump({"generated_at": None, "mails": [
+    {"id": "mk", "subject": "Midsem marks uploaded", "from": "e@bits.ac.in",
+     "from_address": "e@bits.ac.in", "category": "Classes", "summary": "s",
+     "absolute": True, "rescued": True, "rescue_reason": "it mentions marks or grades",
+     "body_html": "<p>x</p>", "received_at": datetime.now(timezone.utc).isoformat()},
+]}, open(v.STORE_FILE, "w", encoding="utf-8"))
+v.add_report("mk")
+row = v.mails_for_ui()["mails"][0]
+check("the viewer refuses to mark marks mail as reported", row["reported"] is False)
+check("the viewer flags marks mail as absolute", row["absolute"] is True)
+check("a report on marks mail is still recorded for the record",
+      v.reported_ids() == {"mk"})
+
+check("the viewer never treats absolute mail as filtered",
+      "!m.absolute" in v.PAGE)
+check("the Report button is disabled for marks mail",
+      "Marks mail is always shown" in v.PAGE)
 
 check("the viewer binds to loopback only", v.HOST == "127.0.0.1")
 
