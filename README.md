@@ -87,6 +87,33 @@ crontab -e
 55 7 * * * cd /path/to/mail_filter && PYTHONUTF8=1 MAIL_FILTER_NONINTERACTIVE=1 ./.venv/bin/python mail_filter.py >> digest.log 2>&1
 ```
 
+## The viewer
+
+```powershell
+.iew.ps1
+```
+
+Opens a local website at `http://127.0.0.1:8765/` showing every mail worth
+your attention: the subject as a heading, an AI summary underneath, and two
+buttons.
+
+- **Original** opens the message exactly as it was sent, unedited. It is
+  displayed inside a sandboxed frame that permits no scripts and no network
+  access, and remote images stay blocked until you click **Load images** -
+  most remote images in email are tracking pixels that tell the sender when
+  you opened it.
+- **Report** marks a mail as not important. That feeds back into the
+  classifier: reported senders are passed to the model as guidance on the next
+  run, and they are the one thing allowed to override the never-hide rules
+  below. Every report can be undone.
+
+There is also a **Filtered** tab. Mail the classifier hid is still listed
+there, so nothing is ever actually invisible - a wrong Ignore costs you one
+click, not a missed email.
+
+The server binds to `127.0.0.1`, so the site is reachable only from this
+computer. Your mail is never uploaded anywhere.
+
 ## How much to trust the classification
 
 Emails are written by strangers, and the model can be wrong, so the classifier
@@ -94,6 +121,20 @@ is wrapped in several layers of checking: a JSON schema constrains decoding so a
 invalid category can't be produced, emails are referred to by index rather than
 by Gmail id, every row is re-validated locally, unresolved ones are retried,
 and anything still unresolved is shown under **Other** rather than hidden.
+
+**Mail is never hidden just because the model said so.** An `Ignore` is
+overruled whenever any of these is true:
+
+1. the sender is a university address (any `bits-pilani.ac.in` domain)
+2. the subject or preview mentions anything with a consequence - exams,
+   deadlines, fees, forms, results, placements, hostel matters, and so on
+3. it is a reply to a thread you started
+
+Only a mail you have explicitly **Reported** can bypass those rules. And even
+a hidden mail is still listed under the viewer's **Filtered** tab.
+
+This is deliberately lopsided. It lets some junk through, because a stray
+newsletter costs you one line to skim and a missed exam notice does not.
 
 Untrusted email text is capped and fenced off in the prompt, so a mail can't
 forge an entry or issue instructions. A keyword net overrules the model
@@ -116,7 +157,7 @@ credentials, no model calls:
 ## Notes
 
 - Only read access to Gmail is requested — the script never sends, deletes, or modifies anything.
-- `credentials.json` and `token.json` are secrets. They're in `.gitignore` — never commit or share them.
+- `credentials.json` and `token.json` are secrets, and `digest_store.json` and `feedback.json` contain your actual mail. All four are in `.gitignore` — never commit or share them.
 - Classification is free: it runs locally on `gemma3:4b`. The model is loaded for the few seconds a digest needs and then unloaded, so it doesn't sit in VRAM all day.
 - A digest of 50–100 emails takes a few seconds. The first run after a reboot is slower because the model has to load.
 - If you want different categories or rules, edit `CATEGORY_DESCRIPTIONS` near the top of `mail_filter.py` — the wording there is literally what's sent to the model, so plain-English changes are enough.

@@ -3,8 +3,12 @@ credentials.json
 token.json
 .env
 
-# Local state and output
+# Local state and output - digest_store.json holds the full text of your
+# mail and feedback.json holds what you reported. Both are personal data and
+# must never leave this machine.
 last_run.json
+digest_store.json
+feedback.json
 *.tmp
 digest.log
 digest.log.1
