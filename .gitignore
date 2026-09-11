@@ -1,0 +1,15 @@
+# Secrets - never commit these
+credentials.json
+token.json
+.env
+
+# Local state and output
+last_run.json
+*.tmp
+digest.log
+digest.log.1
+
+# Python
+.venv/
+__pycache__/
+*.pyc

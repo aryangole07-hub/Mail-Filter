@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Filter</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 42rem; margin: 0 auto; padding: 2.5rem 1.25rem;
+         font: 16px/1.6 system-ui, -apple-system, Segoe UI, sans-serif; }
+  h1 { margin-bottom: .25rem; }
+  .sub { color: #666; margin-top: 0; }
+  code { background: rgba(127,127,127,.15); padding: .1em .35em; border-radius: 3px; }
+  footer { margin-top: 3rem; font-size: .9rem; color: #666; }
+</style>
+</head>
+<body>
+<h1>Mail Filter</h1>
+<p class="sub">A personal tool that sorts one student's inbox into a daily digest.</p>
+
+<h2>What it does</h2>
+<p>
+  Mail Filter reads recent messages from a single Gmail account and groups them
+  into a short daily digest so that academic mail is not buried under
+  promotions. Every message is placed into one of four groups:
+</p>
+<ul>
+  <li><strong>Classes</strong> — midsems, compres, exit tests, quizzes, assignments, cancelled or rescheduled lectures</li>
+  <li><strong>Fests</strong> — hackathons, events, competitions, workshops</li>
+  <li><strong>Other</strong> — replies, portal and registration notices, hostel notices, policy changes</li>
+  <li><strong>Ignore</strong> — promotions, newsletters and spam, which are left out of the digest</li>
+</ul>
+
+<h2>How it works</h2>
+<p>
+  It is a command-line script that runs on one personal computer, once a day.
+  It requests read-only access to Gmail
+  (<code>gmail.readonly</code>) and never sends, deletes, labels or modifies
+  any message. Sorting is done by a language model that runs locally on the
+  same computer, so the text of an email is never sent to any external
+  service.
+</p>
+
+<h2>Who it is for</h2>
+<p>
+  It is not a commercial product and is not offered to the public. It was
+  written for, and is used by, a single person on their own mailbox.
+</p>
+
+<footer>
+  <p><a href="privacy.html">Privacy policy</a></p>
+</footer>
+</body>
+</html>
