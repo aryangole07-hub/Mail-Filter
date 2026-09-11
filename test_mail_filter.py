@@ -383,14 +383,27 @@ check("prompt biases uncertainty toward showing, not hiding",
       "when in doubt, show it" in p.lower())
 check("prompt states the asymmetric cost of a wrong Ignore",
       "missed exam" in p.lower() and "ignore is the rare exception" in p.lower())
-check("prompt is clean of report history when there is none",
-      "previously marked" not in p)
+check("prompt is clean of feedback history when there is none",
+      "not important" not in p and "IMPORTANT" not in p)
 p_fb = m.build_batch_prompt(
     emails[:2], {"senders": {"spam@ads.com": 3}, "subjects": set()})
 check("reported senders reach the model as guidance",
-      "spam@ads.com" in p_fb and "previously marked" in p_fb)
+      "spam@ads.com" in p_fb and "as not important" in p_fb)
 check("report guidance is advisory, not absolute",
       "not an absolute" in p_fb)
+
+p_imp = m.build_batch_prompt(
+    emails[:2], {"important_senders": {"prof@bits.ac.in"}})
+check("senders marked important reach the model too",
+      "prof@bits.ac.in" in p_imp)
+check("important guidance is stated as absolute, unlike a report",
+      "Never" in p_imp and "whatever it looks like" in p_imp)
+
+p_both = m.build_batch_prompt(emails[:2], {
+    "senders": {"spam@ads.com": 1}, "subjects": set(),
+    "important_senders": {"prof@bits.ac.in"}})
+check("important guidance is listed before report guidance",
+      p_both.index("IMPORTANT") < p_both.index("as not important"))
 check("subject cap enforced", m._truncate("y" * 9999, m.MAX_SUBJECT_CHARS)
       .startswith("y" * m.MAX_SUBJECT_CHARS))
 
@@ -482,6 +495,68 @@ reply = [{"id": "r1", "subject": "Re: my query", "snippet": "", "from": "x@outsi
 mpr = {"r1": "Ignore"}
 m.apply_safety_net(reply, mpr)
 check("a reply to your own thread is never hidden", mpr["r1"] != "Ignore")
+
+section("ABSOLUTE - mail you marked important is never hidden again")
+
+imp_fb = {"senders": {}, "subjects": set(),
+          "important_ids": {"i1"}, "important_senders": {"prof@bits.ac.in"},
+          "important_subjects": {"weekly notice"}}
+
+mp = {"i1": "Ignore"}
+r = m.apply_safety_net([{"id": "i1", "subject": "anything", "snippet": "",
+                         "from": "who@ever.com"}], mp, imp_fb)
+check("a mail marked important by id is shown", mp["i1"] != "Ignore", str(mp))
+check("it is flagged absolute", r and r[0].get("absolute") is True)
+check("it says why", r and "important" in r[0]["rescue_reason"])
+
+mp = {"x": "Ignore"}
+m.apply_safety_net([{"id": "x", "subject": "totally new subject", "snippet": "",
+                     "from": "Prof <prof@bits.ac.in>"}], mp, imp_fb)
+check("future mail from a sender you marked important is shown too",
+      mp["x"] != "Ignore", str(mp))
+
+mp = {"y": "Ignore"}
+m.apply_safety_net([{"id": "y", "subject": "Weekly Notice", "snippet": "",
+                     "from": "someone@else.com"}], mp, imp_fb)
+check("a subject you marked important is shown again", mp["y"] != "Ignore", str(mp))
+
+# The central guarantee: a report can never undo an important mark.
+both = {"senders": {"prof@bits.ac.in": 5}, "subjects": {"weekly notice"},
+        "important_ids": set(), "important_senders": {"prof@bits.ac.in"},
+        "important_subjects": set()}
+mp = {"z": "Ignore"}
+m.apply_safety_net([{"id": "z", "subject": "Weekly Notice", "snippet": "",
+                     "from": "prof@bits.ac.in"}], mp, both)
+check("a report CANNOT re-hide a sender marked important",
+      mp["z"] != "Ignore", str(mp))
+
+check("an untouched sender is unaffected by someone else's mark",
+      m.apply_safety_net([{"id": "q", "subject": "50% off", "snippet": "",
+                           "from": "ads@shop.com"}], {"q": "Ignore"}, imp_fb) == [])
+
+# load_feedback reconciles the two lists on disk.
+fd = tempfile.mkdtemp()
+orig_fb = m.FEEDBACK_FILE
+m.FEEDBACK_FILE = os.path.join(fd, "feedback.json")
+json.dump({
+    "reports": [{"id": "r1", "sender_address": "a@x.com", "subject": "Sale"},
+                {"id": "r2", "sender_address": "prof@bits.ac.in", "subject": "Notice"}],
+    "important": [{"id": "i9", "sender_address": "prof@bits.ac.in", "subject": "Notice"}],
+}, open(m.FEEDBACK_FILE, "w", encoding="utf-8"))
+fb = m.load_feedback()
+check("reports are loaded", "a@x.com" in fb["senders"])
+check("important marks are loaded", "prof@bits.ac.in" in fb["important_senders"])
+check("a sender marked important is dropped from the report side",
+      "prof@bits.ac.in" not in fb["senders"], str(fb["senders"]))
+check("missing feedback file is not an error",
+      (os.remove(m.FEEDBACK_FILE), m.load_feedback()["senders"] == {})[1])
+open(m.FEEDBACK_FILE, "w").write("{broken")
+check("corrupt feedback falls back to empty", m.load_feedback()["senders"] == {})
+open(m.FEEDBACK_FILE, "w").write("[]")
+check("feedback of the wrong shape falls back to empty",
+      m.load_feedback()["important_ids"] == set())
+m.FEEDBACK_FILE = orig_fb
+
 
 section("ABSOLUTE - anything about marks always shows, no exceptions")
 
@@ -669,6 +744,287 @@ dead.unload("gemma3:4b")
 check("a failing unload is swallowed", True)
 
 
+section("Gmail quota - a 403 waits instead of dropping mail")
+
+class FakeResp:
+    def __init__(self, status): self.status = status
+
+class QuotaError(Exception):
+    def __init__(self, status, msg="Quota exceeded for quota metric"):
+        super().__init__(msg)
+        self.resp = FakeResp(status)
+
+class FlakyRequest:
+    """Fails `fails` times with `status`, then succeeds."""
+    def __init__(self, fails, status=403, value="ok"):
+        self.fails, self.status, self.value, self.calls = fails, status, value, 0
+    def execute(self):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise QuotaError(self.status)
+        return self.value
+
+_real_sleep = m.time.sleep
+m.time.sleep = lambda s: None          # keep the suite fast
+try:
+    check("a 403 status is read off the error", m._http_status(QuotaError(403)) == 403)
+    check("a non-HTTP error has no status", m._http_status(ValueError("x")) is None)
+    check("the description names the status, not just the class",
+          "HTTP 403" in m._describe(QuotaError(403)))
+    check("the description includes the reason text",
+          "Quota exceeded" in m._describe(QuotaError(403)))
+
+    r = FlakyRequest(2)
+    check("a quota error is retried, not dropped",
+          m._execute_with_backoff(r, "x") == "ok" and r.calls == 3, str(r.calls))
+
+    r429 = FlakyRequest(1, status=429)
+    check("a 429 is retried too", m._execute_with_backoff(r429, "x") == "ok")
+    r503 = FlakyRequest(1, status=503)
+    check("a 503 is retried too", m._execute_with_backoff(r503, "x") == "ok")
+
+    r404 = FlakyRequest(1, status=404)
+    try:
+        m._execute_with_backoff(r404, "x")
+        check("a 404 is NOT retried", False)
+    except QuotaError:
+        check("a 404 is NOT retried", r404.calls == 1, str(r404.calls))
+
+    forever = FlakyRequest(99)
+    try:
+        m._execute_with_backoff(forever, "x")
+        check("retries are bounded", False)
+    except QuotaError:
+        check("retries are bounded", forever.calls == m.FETCH_MAX_ATTEMPTS,
+              str(forever.calls))
+
+    check("batches are small enough to stay inside the quota",
+          m.FETCH_BATCH_SIZE <= 25 and m.FETCH_BATCH_PAUSE_SECONDS > 0)
+finally:
+    m.time.sleep = _real_sleep
+
+
+section("Courses - tagging mail by subject")
+
+import courses as co
+import events as ev
+
+check("a short form in the subject tags the course",
+      co.tag_courses("Regarding FOFA Quiz-2") == ["ECON F212"])
+check("a course code tags the course",
+      co.tag_courses("ECON F212 midsem") == ["ECON F212"])
+check("code matching tolerates spacing and case",
+      co.tag_courses("econ-f211 attendance") == ["ECON F211"])
+check("the full course name tags the course",
+      "BITS F225" in co.tag_courses("Environmental Studies field trip"))
+check("an alias tags the course",
+      co.tag_courses("Technological Sciences reading") == ["HSS F352"])
+check("the old name for a course still tags it",
+      "BITS F225" in co.tag_courses("Environmental Sciences quiz"))
+check("a two-letter form works in a subject",
+      co.tag_courses("M3 tutorial moved") == ["MATH F201"])
+check("a two-letter form in lowercase prose does NOT tag",
+      co.tag_courses("Notice", "the results are out, m3 was hard") == [])
+check("a two-letter form in capitals in the body does tag",
+      co.tag_courses("Notice", "Please submit the M3 assignment") == ["MATH F201"])
+check("'ts' inside ordinary words never tags",
+      co.tag_courses("Your order shipped", "ts tracking details") == [])
+check("untagged mail is not an error", co.tag_courses("Hostel notice") == [])
+check("a mail can carry two courses",
+      set(co.tag_courses("POE and EEB clash")) == {"ECON F211", "ECON F214"})
+check("Linguistics is HSS F222, as the timetable confirms",
+      co.tag_courses("Linguistics reading") == ["HSS F222"])
+check("the superseded MATH F211 spelling still tags the maths course",
+      co.tag_courses("MATH F211 quiz") == ["MATH F201"])
+
+# The professors are the whole point: these two real subjects name no course.
+check("a lecturer's name tags a bare 'Re: Handout'",
+      co.tag_courses("Re: Handout", "", "Ufaque Paiker <u@hyderabad.bits-pilani.ac.in>")
+      == ["HSS F352"])
+check("a lecturer's address tags mail with no subject hint",
+      "ECON F212" in co.tag_courses("Re: something", "", "utkarsh.k@hyderabad.bits-pilani.ac.in"))
+check("a Google Classroom announcement tags via the professor",
+      co.tag_courses('New announcement: "updated slides"', "",
+                     '"Dushyant Kumar (Classroom)" <no-reply@classroom.google.com>')
+      == ["ECON F213"])
+check("every course has at least one professor recorded",
+      all(r["profs"] for r in co.registry_for_ui()))
+check("every course has a display label",
+      all(r["label"] for r in co.registry_for_ui()))
+check("there are eight courses", len(co.COURSES) == 8)
+
+section("Timetable - the weekly schedule")
+
+from datetime import date as _date
+mon = co.classes_on(_date(2026, 9, 14))
+check("Monday has five classes", len(mon) == 5, str(len(mon)))
+check("Monday starts with FoFA at 09:00",
+      mon[0]["code"] == "ECON F212" and mon[0]["start_time"] == "09:00", str(mon[0]))
+check("classes come back in time order",
+      [c["start_time"] for c in mon] == sorted(c["start_time"] for c in mon))
+check("weekends have no classes", co.classes_on(_date(2026, 9, 19)) == [])
+check("dates outside term have no classes", co.classes_on(_date(2026, 6, 1)) == [])
+
+wed_poe = [c for c in co.classes_on(_date(2026, 9, 16)) if c["code"] == "ECON F211"]
+check("Wednesday POE follows the day-by-day timetable (17:00, not 15:00)",
+      wed_poe and wed_poe[0]["start_time"] == "17:00", str(wed_poe))
+
+tue = co.classes_on(_date(2026, 9, 15))
+tut = [c for c in tue if c["type"] == "Tutorial"]
+check("Tuesday has two tutorials", len(tut) == 2, str(len(tut)))
+check("a tutorial carries its own professor, not the lecturer's",
+      any(c["code"] == "MATH F201" and c["profs"] == ["Gujji Murali Mohan Reddy"]
+          for c in tut), str(tut))
+check("ECON F214's tutorial professor differs from its lecturer",
+      co.SLOT_PROFS[("ECON F214", "Tutorial")] != co.SLOT_PROFS[("ECON F214", "Lecture")])
+check("every timetable slot names a real course",
+      all(s["code"] in co.BY_CODE for s in co.WEEKLY))
+check("every timetable slot has a room", all(s["room"] for s in co.WEEKLY))
+check("every slot has a professor recorded",
+      all((s["code"], s["type"]) in co.SLOT_PROFS for s in co.WEEKLY))
+check("a week has 27 timetabled slots", len(co.WEEKLY) == 27, str(len(co.WEEKLY)))
+
+week = co.classes_between(_date(2026, 9, 14), _date(2026, 9, 20))
+check("a full week projects every slot once", len(week) == len(co.WEEKLY), str(len(week)))
+check("class entries are calendar-shaped",
+      all({"title", "date", "start_time", "kind"} <= set(c) for c in week))
+check("class entries are marked as coming from the timetable",
+      all(c["source"] == "timetable" for c in week))
+
+
+section("Events - dates are validated, never trusted")
+
+recv = datetime(2026, 9, 11, tzinfo=timezone.utc)
+good = ev.validate_event(
+    {"title": "FoFA Quiz 2", "date": "2026-11-04", "start_time": "18:15",
+     "end_time": "18:30", "kind": "exam"}, recv)
+check("a well-formed event survives validation", good["title"] == "FoFA Quiz 2")
+check("times are normalised", good["start_time"] == "18:15")
+
+check("a non-date is rejected",
+      ev.validate_event({"title": "x", "date": "next Friday", "kind": "exam"}, recv) is None)
+check("an impossible date is rejected",
+      ev.validate_event({"title": "x", "date": "2026-02-31", "kind": "exam"}, recv) is None)
+check("a date far in the past is rejected",
+      ev.validate_event({"title": "x", "date": "2020-01-01", "kind": "exam"}, recv) is None)
+check("a date absurdly far ahead is rejected",
+      ev.validate_event({"title": "x", "date": "2031-01-01", "kind": "exam"}, recv) is None)
+check("an untitled event is rejected",
+      ev.validate_event({"title": "  ", "date": "2026-09-20", "kind": "exam"}, recv) is None)
+check("a nonsense kind falls back to 'other'",
+      ev.validate_event({"title": "x", "date": "2026-09-20", "kind": "zzz"}, recv)["kind"] == "other")
+check("a nonsense time is dropped, not guessed",
+      ev.validate_event({"title": "x", "date": "2026-09-20", "start_time": "99:99",
+                         "kind": "exam"}, recv)["start_time"] == "")
+check("a non-dict event is rejected", ev.validate_event("nope", recv) is None)
+
+now = datetime(2026, 9, 12, 9, 0, tzinfo=timezone.utc)
+evts = [
+    {"title": "tomorrow", "date": "2026-09-13", "start_time": "10:00"},
+    {"title": "today later", "date": "2026-09-12", "start_time": "18:00"},
+    {"title": "next week", "date": "2026-09-20", "start_time": ""},
+    {"title": "yesterday", "date": "2026-09-11", "start_time": ""},
+]
+up = ev.upcoming(evts, within_days=1, now=now)
+check("upcoming is a strict rolling window, not a calendar day",
+      [e["title"] for e in up] == ["today later"], str(up))
+check("upcoming excludes the past and the far future",
+      all(e["title"] not in ("yesterday", "next week") for e in up))
+check("a wider window reaches tomorrow morning",
+      "tomorrow" in [e["title"] for e in ev.upcoming(evts, within_days=2, now=now)])
+
+tomorrow = ev.on_calendar_date(evts, datetime(2026, 9, 13, tzinfo=timezone.utc))
+check("calendar-day lookup finds tomorrow's 10:00 event",
+      [e["title"] for e in tomorrow] == ["tomorrow"], str(tomorrow))
+check("calendar-day lookup ignores other days",
+      ev.on_calendar_date(evts, datetime(2026, 9, 14, tzinfo=timezone.utc)) == [])
+check("calendar-day lookup sorts untimed events last",
+      [e["title"] for e in ev.on_calendar_date(
+          [{"title": "late", "date": "2026-09-13", "start_time": "23:00"},
+           {"title": "untimed", "date": "2026-09-13", "start_time": ""},
+           {"title": "early", "date": "2026-09-13", "start_time": "08:00"}],
+          datetime(2026, 9, 13, tzinfo=timezone.utc))] == ["early", "late", "untimed"])
+check("upcoming survives a malformed event",
+      ev.upcoming([{"title": "bad", "date": "??"}], now=now) == [])
+
+
+section("Ask - an answer must be traceable to an email")
+
+import qa
+
+class StubModel:
+    """Returns a canned JSON reply, recording the prompt it was given."""
+    def __init__(self, payload):
+        self.payload = payload
+        self.prompts = []
+        self.messages = self
+    def create(self, model, max_tokens, messages, output_config=None):
+        self.prompts.append(messages[0]["content"])
+        return Reply(json.dumps(self.payload))
+
+qmails = [
+    {"id": "a", "subject": "FoFA Quiz 2 postponed", "from": "u@bits.ac.in",
+     "summary": "Quiz moved to 4 Nov", "body_text": "The quiz is on 4 November",
+     "received_at": datetime.now(timezone.utc).isoformat(), "courses": ["ECON F212"],
+     "events": [{"title": "FoFA Quiz 2", "date": "2026-11-04", "start_time": "18:15"}]},
+    {"id": "b", "subject": "Hostel water supply", "from": "w@bits.ac.in",
+     "summary": "Water off Tuesday", "body_text": "No water on Tuesday",
+     "received_at": datetime.now(timezone.utc).isoformat(), "courses": []},
+]
+
+ok = qa.ask(StubModel({"answer": "The quiz is on 4 November.", "sources": [1],
+                       "found": True}), "m", qmails, "when is the fofa quiz")
+check("a grounded answer is returned", ok["found"] is True)
+check("the answer carries its source", [s["id"] for s in ok["sources"]] == ["a"])
+
+# The core refusal.
+nosrc = qa.ask(StubModel({"answer": "It is on 4 November.", "sources": [],
+                          "found": True}), "m", qmails, "when is the fofa quiz")
+check("a confident answer citing NOTHING is refused", nosrc["found"] is False)
+check("the refusal explains itself rather than inventing",
+      "could not" in nosrc["answer"].lower())
+
+bogus = qa.ask(StubModel({"answer": "Yes.", "sources": [99, -1, 0],
+                          "found": True}), "m", qmails, "when is the fofa quiz")
+check("invented source numbers are discarded", bogus["found"] is False)
+
+partial = qa.ask(StubModel({"answer": "On 4 Nov.", "sources": [1, 99],
+                            "found": True}), "m", qmails, "when is the fofa quiz")
+check("a real source survives alongside an invented one",
+      partial["found"] is True and [s["id"] for s in partial["sources"]] == ["a"])
+
+degen = qa.ask(StubModel({"answer": "found: false", "sources": [], "found": False}),
+               "m", qmails, "when is my flight")
+check("a model echoing the field name is replaced with real prose",
+      "found:" not in degen["answer"].lower() and len(degen["answer"]) > 20,
+      degen["answer"])
+
+check("a question matching no mail never reaches the model",
+      qa.ask(None, "m", qmails, "zzzq xqjk")["found"] is False)
+check("an empty question is refused", qa.ask(None, "m", qmails, "  ")["ok"] is False)
+
+broken = qa.ask(StubModel({"nope": 1}), "m", qmails, "when is the fofa quiz")
+check("a reply missing required fields does not crash", broken["found"] is False)
+
+stub = StubModel({"answer": "x", "sources": [1], "found": True})
+qa.ask(stub, "m", qmails, "when is the fofa quiz")
+prompt = stub.prompts[0]
+check("the prompt fences untrusted mail", "<emails>" in prompt and "</emails>" in prompt)
+check("the prompt forbids answering from general knowledge",
+      "ONLY the emails" in prompt)
+check("the prompt says an uncited answer is discarded", "discarded" in prompt)
+check("the prompt asks for neutral pronouns", '"they"' in prompt)
+check("only relevant mail is put in the prompt",
+      "Hostel water" not in prompt, prompt[:200])
+
+check("retrieval ranks the matching mail first",
+      qa.select_context(qmails, "fofa quiz")[0]["id"] == "a")
+check("retrieval returns nothing for an unrelated question",
+      qa.select_context(qmails, "zzzq xqjk") == [])
+check("stopwords alone do not match everything",
+      qa.select_context(qmails, "the is a of") == [])
+
+
 section("Viewer - safety of the original-message view")
 
 vspec = importlib.util.spec_from_file_location(
@@ -753,10 +1109,19 @@ check("the viewer flags marks mail as absolute", row["absolute"] is True)
 check("a report on marks mail is still recorded for the record",
       v.reported_ids() == {"mk"})
 
+ui = v.page()
 check("the viewer never treats absolute mail as filtered",
-      "!m.absolute" in v.PAGE)
-check("the Report button is disabled for marks mail",
-      "Marks mail is always shown" in v.PAGE)
+      "&& !m.absolute" in ui)
+check("the Report button is disabled for mail that can never be hidden",
+      "This can never be hidden" in ui)
+check("the page offers a Mark important action", "Mark important" in ui)
+check("the page has all three views",
+      all(x in ui for x in ['data-v="mail"', 'data-v="calendar"', 'data-v="ask"']))
+check("the page offers every date filter mode",
+      all(x in ui for x in ['value="on"', 'value="before"', 'value="after"',
+                            'value="between"']))
+check("a missing ui.html explains itself rather than serving a blank page",
+      "ui.html is missing" in v.FALLBACK_PAGE)
 
 check("the viewer binds to loopback only", v.HOST == "127.0.0.1")
 

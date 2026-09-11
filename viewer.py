@@ -20,7 +20,7 @@ import sys
 import threading
 import urllib.parse
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STORE_FILE = os.path.join(SCRIPT_DIR, "digest_store.json")
@@ -96,6 +96,52 @@ def reported_ids():
     return {r.get("id") for r in load_feedback().get("reports", [])}
 
 
+def important_ids():
+    return {r.get("id") for r in load_feedback().get("important", [])}
+
+
+def important_senders():
+    return {(r.get("sender_address") or "").lower()
+            for r in load_feedback().get("important", []) if r.get("sender_address")}
+
+
+def mark_important(mail_id, undo=False):
+    """Record that a mail the program hid actually mattered.
+
+    Marking also clears any report on the same sender: the student has just
+    said, in the strongest terms available to them, that this sender's mail
+    must be shown, and leaving a stale report in place would let the mistake
+    repeat.
+    """
+    store = load_store()
+    mail = next((m for m in store["mails"] if m.get("id") == mail_id), None)
+    if mail is None:
+        return False, "unknown mail id"
+
+    data = load_feedback()
+    marked = [r for r in data.get("important", []) if r.get("id") != mail_id]
+    address = (mail.get("from_address") or "").lower()
+
+    if not undo:
+        marked.append({
+            "id": mail_id,
+            "subject": mail.get("subject", ""),
+            "sender_address": address,
+            "sender": mail.get("from", ""),
+            "was_category": mail.get("category", ""),
+            "marked_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if address:
+            data["reports"] = [
+                r for r in data.get("reports", [])
+                if (r.get("sender_address") or "").lower() != address
+            ]
+
+    data["important"] = marked
+    save_feedback(data)
+    return True, len(marked)
+
+
 def mails_for_ui():
     """The store, minus the bodies, plus whether each has been reported.
 
@@ -105,6 +151,8 @@ def mails_for_ui():
     """
     store = load_store()
     reported = reported_ids()
+    marked = important_ids()
+    marked_senders = important_senders()
     out = []
     for m in store["mails"]:
         if not isinstance(m, dict) or not m.get("id"):
@@ -120,15 +168,78 @@ def mails_for_ui():
             "summary": m.get("summary") or "",
             "snippet": m.get("snippet") or "",
             "institution": bool(m.get("institution")),
+            "courses": m.get("courses") or [],
+            "events": m.get("events") or [],
             "rescued": bool(m.get("rescued")),
             "rescue_reason": m.get("rescue_reason") or "",
-            "absolute": bool(m.get("absolute")),
-            # A reported mail is hidden from the main list - unless it is
-            # marks mail, which nothing is allowed to hide.
-            "reported": m["id"] in reported and not m.get("absolute"),
+            "marked_important": (
+                m["id"] in marked
+                or (m.get("from_address") or "").lower() in marked_senders
+            ),
+            # Marks mail, or a mail the student has personally corrected.
+            "absolute": bool(m.get("absolute")) or m["id"] in marked,
+            # A reported mail is hidden from the main list - unless nothing is
+            # allowed to hide it.
+            "reported": (
+                m["id"] in reported
+                and not m.get("absolute")
+                and m["id"] not in marked
+            ),
             "has_body": bool(m.get("body_html") or m.get("body_text")),
         })
     return {"generated_at": store.get("generated_at"), "mails": out}
+
+
+_CLIENT = None
+
+
+def model_client():
+    """The local Ollama client, imported on first use.
+
+    Deferred so the viewer opens and lists mail even when Ollama is not
+    running - only the Ask tab needs it, and it says so itself when it fails.
+    """
+    global _CLIENT
+    if _CLIENT is None:
+        import mail_filter
+        _CLIENT = (mail_filter.OllamaClient(), mail_filter.CLASSIFY_MODEL)
+    return _CLIENT
+
+
+def calendar_entries(start_date, end_date):
+    """Timetable classes plus every dated thing found in mail, in one list."""
+    import courses
+
+    entries = list(courses.classes_between(start_date, end_date))
+
+    reported = reported_ids()
+    marked = important_ids()
+    for mail in load_store()["mails"]:
+        if not isinstance(mail, dict):
+            continue
+        hidden = (
+            mail.get("category") == "Ignore" or mail.get("id") in reported
+        ) and not (mail.get("absolute") or mail.get("id") in marked)
+        if hidden:
+            continue
+        for event in mail.get("events") or []:
+            if not isinstance(event, dict) or not event.get("date"):
+                continue
+            try:
+                when = datetime.strptime(event["date"], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if not (start_date <= when <= end_date):
+                continue
+            entry = dict(event)
+            entry["source"] = "mail"
+            entry["mail_id"] = mail.get("id")
+            entry["mail_subject"] = mail.get("subject", "")
+            entry["courses"] = mail.get("courses") or []
+            entries.append(entry)
+
+    entries.sort(key=lambda e: (e.get("date", ""), e.get("start_time") or "99:99"))
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -208,398 +319,28 @@ def escape_html(text):
 # The page
 # ---------------------------------------------------------------------------
 
-PAGE = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mail Filter</title>
-<style>
-:root{
-  --bg:#f6f7f9; --panel:#ffffff; --ink:#14161a; --muted:#6b7280;
-  --line:#e6e8ec; --accent:#3b6df6; --accent-soft:#eaf0ff;
-  --classes:#2f6df6; --fests:#c2410c; --other:#5b6472; --danger:#b42318;
-  --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px -12px rgba(16,24,40,.18);
-  --radius:14px;
-}
-@media (prefers-color-scheme:dark){
-  :root:not([data-theme="light"]){
-    --bg:#0e1013; --panel:#16191e; --ink:#e8eaee; --muted:#98a1ae;
-    --line:#262b33; --accent:#7aa2ff; --accent-soft:#1a2540;
-    --classes:#7aa2ff; --fests:#fb923c; --other:#9aa4b2; --danger:#f97066;
-    --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -16px rgba(0,0,0,.7);
-  }
-}
-:root[data-theme="dark"]{
-  --bg:#0e1013; --panel:#16191e; --ink:#e8eaee; --muted:#98a1ae;
-  --line:#262b33; --accent:#7aa2ff; --accent-soft:#1a2540;
-  --classes:#7aa2ff; --fests:#fb923c; --other:#9aa4b2; --danger:#f97066;
-  --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -16px rgba(0,0,0,.7);
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  -webkit-font-smoothing:antialiased;}
-.wrap{max-width:860px;margin:0 auto;padding:28px 16px 80px;}
+UI_FILE = os.path.join(SCRIPT_DIR, "ui.html")
 
-header{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px;}
-h1{font-size:24px;letter-spacing:-.02em;margin:0 0 4px;}
-.sub{color:var(--muted);font-size:13px;margin:0;}
-.spacer{flex:1 1 auto}
-.iconbtn{background:var(--panel);border:1px solid var(--line);color:var(--muted);
-  width:36px;height:36px;border-radius:10px;cursor:pointer;font-size:15px;
-  transition:transform .16s ease,color .16s ease,border-color .16s ease;}
-.iconbtn:hover{transform:translateY(-1px);color:var(--ink);border-color:var(--accent);}
-.iconbtn:active{transform:translateY(0) scale(.96);}
+# Fallback shown only if ui.html is missing, so a broken install says why
+# instead of serving a blank page.
+FALLBACK_PAGE = (
+    "<!doctype html><meta charset='utf-8'><title>Mail Filter</title>"
+    "<body style=\"font:15px system-ui;padding:40px;max-width:40em;margin:auto\">"
+    "<h1>ui.html is missing</h1><p>The viewer serves its page from "
+    "<code>ui.html</code>, which should sit next to <code>viewer.py</code>. "
+    "Re-download it from the repository.</p>"
+)
 
-.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:18px;}
-.search{flex:1 1 220px;min-width:180px;background:var(--panel);border:1px solid var(--line);
-  color:var(--ink);border-radius:10px;padding:9px 12px;font:inherit;font-size:14px;
-  transition:border-color .16s ease,box-shadow .16s ease;}
-.search:focus{outline:none;border-color:var(--accent);
-  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);}
-.tab{background:var(--panel);border:1px solid var(--line);color:var(--muted);
-  padding:8px 13px;border-radius:999px;cursor:pointer;font:inherit;font-size:13px;
-  white-space:nowrap;transition:all .16s ease;}
-.tab:hover{color:var(--ink);transform:translateY(-1px);}
-.tab[aria-selected="true"]{background:var(--accent-soft);border-color:var(--accent);
-  color:var(--accent);font-weight:600;}
-.tab .n{opacity:.65;margin-left:5px;font-variant-numeric:tabular-nums;}
 
-.sectitle{display:flex;align-items:center;gap:9px;margin:26px 0 12px;
-  font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
-  color:var(--muted);}
-.sectitle::after{content:"";flex:1;height:1px;background:var(--line);}
+def page():
+    """The UI, read from disk each request so an edit shows on refresh."""
+    try:
+        with open(UI_FILE, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return FALLBACK_PAGE
 
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:15px 17px;margin-bottom:11px;box-shadow:var(--shadow);position:relative;
-  animation:rise .42s cubic-bezier(.22,1,.36,1) backwards;
-  transition:transform .18s ease,border-color .18s ease,opacity .28s ease;}
-.card:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 40%,var(--line));}
-.card.leaving{opacity:0;transform:translateX(36px) scale(.97);}
-@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){
-  .card{animation:none}
-  *{transition-duration:.01ms !important}
-}
 
-.subject{font-size:15.5px;font-weight:650;letter-spacing:-.01em;margin:0 0 5px;
-  line-height:1.35;word-break:break-word;}
-.meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;
-  font-size:12.5px;color:var(--muted);margin-bottom:9px;}
-.meta .who{font-weight:500;color:var(--ink);opacity:.8;}
-.dot{opacity:.4}
-.summary{font-size:14px;color:var(--ink);opacity:.9;margin:0 0 12px;word-break:break-word;}
-.summary.empty{font-style:italic;opacity:.55;}
-
-.badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:650;
-  padding:2px 8px;border-radius:999px;letter-spacing:.02em;white-space:nowrap;}
-.badge.cat{background:color-mix(in srgb,currentColor 12%,transparent);}
-.cat-Classes{color:var(--classes)} .cat-Fests{color:var(--fests)} .cat-Other{color:var(--other)}
-.badge.rescue{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);cursor:help;}
-
-.actions{display:flex;gap:8px;flex-wrap:wrap;}
-.btn{border:1px solid var(--line);background:transparent;color:var(--ink);
-  padding:7px 14px;border-radius:9px;cursor:pointer;font:inherit;font-size:13px;
-  font-weight:550;transition:all .16s ease;}
-.btn:hover{transform:translateY(-1px);border-color:var(--accent);color:var(--accent);}
-.btn:active{transform:translateY(0) scale(.97);}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
-.btn.primary:hover{color:#fff;filter:brightness(1.08);}
-.btn.ghost{color:var(--muted);}
-.btn.ghost:hover{color:var(--danger);border-color:var(--danger);}
-.btn[disabled]{opacity:.5;cursor:not-allowed;transform:none;}
-
-.empty-state{text-align:center;padding:64px 20px;color:var(--muted);}
-.empty-state .big{font-size:34px;margin-bottom:10px;}
-
-/* modal */
-.overlay{position:fixed;inset:0;background:rgba(8,10,14,.55);backdrop-filter:blur(3px);
-  display:flex;align-items:center;justify-content:center;padding:20px;z-index:50;
-  opacity:0;pointer-events:none;transition:opacity .22s ease;}
-.overlay.open{opacity:1;pointer-events:auto;}
-.modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;
-  width:min(920px,100%);height:min(86vh,900px);display:flex;flex-direction:column;
-  box-shadow:0 28px 70px -20px rgba(0,0,0,.5);overflow:hidden;
-  transform:translateY(14px) scale(.985);opacity:0;
-  transition:transform .26s cubic-bezier(.22,1,.36,1),opacity .2s ease;}
-.overlay.open .modal{transform:none;opacity:1;}
-.mhead{display:flex;align-items:center;gap:12px;padding:13px 16px;
-  border-bottom:1px solid var(--line);}
-.mtitle{font-weight:650;font-size:14.5px;flex:1;min-width:0;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;}
-.mframe{flex:1;border:0;width:100%;background:#fff;}
-.mfoot{padding:9px 16px;border-top:1px solid var(--line);font-size:12px;
-  color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
-
-/* toast */
-.toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,20px);
-  background:var(--panel);border:1px solid var(--line);border-radius:12px;
-  padding:11px 15px;box-shadow:var(--shadow);display:flex;align-items:center;gap:12px;
-  opacity:0;pointer-events:none;transition:all .24s cubic-bezier(.22,1,.36,1);z-index:60;
-  font-size:13.5px;max-width:calc(100vw - 32px);}
-.toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto;}
-.toast button{background:none;border:0;color:var(--accent);font:inherit;font-weight:650;
-  cursor:pointer;padding:0;}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <header>
-    <div>
-      <h1>Mail Filter</h1>
-      <p class="sub" id="sub">Loading…</p>
-    </div>
-    <div class="spacer"></div>
-    <button class="iconbtn" id="theme" title="Toggle light / dark">◐</button>
-    <button class="iconbtn" id="refresh" title="Reload from disk">⟳</button>
-  </header>
-
-  <div class="controls">
-    <input class="search" id="q" type="search" placeholder="Search subject, sender or summary…" autocomplete="off">
-    <button class="tab" data-f="all" aria-selected="true">All<span class="n"></span></button>
-    <button class="tab" data-f="Classes" aria-selected="false">📚 Classes<span class="n"></span></button>
-    <button class="tab" data-f="Fests" aria-selected="false">🎉 Fests<span class="n"></span></button>
-    <button class="tab" data-f="Other" aria-selected="false">📌 Other<span class="n"></span></button>
-    <button class="tab" data-f="filtered" aria-selected="false">🗃 Filtered<span class="n"></span></button>
-  </div>
-
-  <div id="list"></div>
-</div>
-
-<div class="overlay" id="overlay">
-  <div class="modal" role="dialog" aria-modal="true" aria-label="Original message">
-    <div class="mhead">
-      <div class="mtitle" id="mtitle"></div>
-      <button class="btn" id="imgs">Load images</button>
-      <button class="btn" id="close">Close</button>
-    </div>
-    <iframe class="mframe" id="mframe" sandbox referrerpolicy="no-referrer"></iframe>
-    <div class="mfoot" id="mfoot"></div>
-  </div>
-</div>
-
-<div class="toast" id="toast"><span id="toastmsg"></span><button id="undo">Undo</button></div>
-
-<script>
-const $ = s => document.querySelector(s);
-let MAILS = [], FILTER = "all", QUERY = "", CURRENT = null, LASTREPORT = null;
-
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-
-function senderName(from){
-  const m = String(from||"").match(/^\s*"?([^"<]*?)"?\s*<.*>\s*$/);
-  const name = m ? m[1].trim() : "";
-  return name || String(from||"").replace(/[<>]/g,"") || "unknown sender";
-}
-
-function when(iso, fallback){
-  if(!iso) return fallback || "";
-  const d = new Date(iso);
-  if(isNaN(d)) return fallback || "";
-  const mins = Math.round((Date.now() - d) / 60000);
-  if(mins < 1)   return "just now";
-  if(mins < 60)  return mins + "m ago";
-  const hrs = Math.round(mins/60);
-  if(hrs < 24)   return hrs + "h ago";
-  const days = Math.round(hrs/24);
-  if(days < 7)   return days + "d ago";
-  return d.toLocaleDateString(undefined,{day:"numeric",month:"short"});
-}
-
-function visible(){
-  const q = QUERY.trim().toLowerCase();
-  return MAILS.filter(m => {
-    const isFiltered = (m.category === "Ignore" || m.reported) && !m.absolute;
-    if(FILTER === "filtered"){ if(!isFiltered) return false; }
-    else if(FILTER === "all"){ if(isFiltered) return false; }
-    else { if(isFiltered || m.category !== FILTER) return false; }
-    if(!q) return true;
-    return (m.subject+" "+m.from+" "+m.summary+" "+m.snippet).toLowerCase().includes(q);
-  });
-}
-
-function counts(){
-  const c = {all:0, Classes:0, Fests:0, Other:0, filtered:0};
-  for(const m of MAILS){
-    if((m.category === "Ignore" || m.reported) && !m.absolute){ c.filtered++; continue; }
-    c.all++;
-    if(c[m.category] !== undefined) c[m.category]++;
-  }
-  return c;
-}
-
-function card(m, i){
-  const el = document.createElement("article");
-  el.className = "card";
-  el.style.animationDelay = Math.min(i,12)*28 + "ms";
-  el.dataset.id = m.id;
-  const summary = m.summary
-    ? `<p class="summary">${esc(m.summary)}</p>`
-    : `<p class="summary empty">${esc(m.snippet || "No summary available — open the original.")}</p>`;
-  const rescue = m.absolute
-    ? `<span class="badge rescue" title="This mentions marks or grades, so it is always shown and cannot be hidden by a report">marks</span>`
-    : m.rescued
-    ? `<span class="badge rescue" title="Kept visible because ${esc(m.rescue_reason)}">shielded</span>` : "";
-  const reported = m.reported
-    ? `<span class="badge rescue" title="You reported this as not important">reported</span>` : "";
-  el.innerHTML = `
-    <h2 class="subject">${esc(m.subject)}</h2>
-    <div class="meta">
-      <span class="badge cat cat-${esc(m.category)}">${esc(m.category)}</span>
-      <span class="who">${esc(senderName(m.from))}</span>
-      <span class="dot">·</span><span>${esc(when(m.received_at, m.date))}</span>
-      ${rescue}${reported}
-    </div>
-    ${summary}
-    <div class="actions">
-      <button class="btn primary" data-act="open">Original</button>
-      <button class="btn ghost" data-act="report"${m.absolute ? ' disabled title="Marks mail is always shown"' : ""}>${m.reported ? "Not junk" : "Report"}</button>
-    </div>`;
-  el.querySelector('[data-act="open"]').onclick = () => openOriginal(m);
-  el.querySelector('[data-act="report"]').onclick = e => report(m, el, e.currentTarget);
-  return el;
-}
-
-function render(){
-  const list = $("#list"); list.innerHTML = "";
-  const rows = visible();
-  const c = counts();
-  document.querySelectorAll(".tab").forEach(t => {
-    t.setAttribute("aria-selected", String(t.dataset.f === FILTER));
-    t.querySelector(".n").textContent = c[t.dataset.f] ?? 0;
-  });
-
-  if(!rows.length){
-    list.innerHTML = `<div class="empty-state"><div class="big">✦</div>
-      <div>${QUERY ? "Nothing matches that search." :
-        FILTER === "filtered" ? "Nothing has been filtered out." :
-        "No mail here yet. Run mail_filter.py to fetch your digest."}</div></div>`;
-    return;
-  }
-
-  if(FILTER === "all"){
-    let i = 0;
-    for(const cat of ["Classes","Fests","Other"]){
-      const group = rows.filter(m => m.category === cat);
-      if(!group.length) continue;
-      const h = document.createElement("div");
-      h.className = "sectitle";
-      h.textContent = `${cat} · ${group.length}`;
-      list.appendChild(h);
-      for(const m of group) list.appendChild(card(m, i++));
-    }
-  } else {
-    rows.forEach((m,i) => list.appendChild(card(m,i)));
-  }
-}
-
-// --- original message ------------------------------------------------------
-function openOriginal(m, withImages){
-  CURRENT = m;
-  $("#mtitle").textContent = m.subject;
-  $("#mframe").src = `/original/${encodeURIComponent(m.id)}?images=${withImages?1:0}`;
-  $("#imgs").textContent = withImages ? "Images shown" : "Load images";
-  $("#imgs").disabled = !!withImages;
-  $("#mfoot").textContent = withImages
-    ? "Showing the message exactly as received, with remote images loaded."
-    : "Shown exactly as received. Remote images are blocked — many are tracking pixels that tell the sender when you opened the mail.";
-  $("#overlay").classList.add("open");
-  document.body.style.overflow = "hidden";
-}
-function closeModal(){
-  $("#overlay").classList.remove("open");
-  document.body.style.overflow = "";
-  setTimeout(() => { $("#mframe").src = "about:blank"; }, 240);
-}
-$("#close").onclick = closeModal;
-$("#imgs").onclick = () => CURRENT && openOriginal(CURRENT, true);
-$("#overlay").onclick = e => { if(e.target === $("#overlay")) closeModal(); };
-document.addEventListener("keydown", e => { if(e.key === "Escape") closeModal(); });
-
-// --- report ---------------------------------------------------------------
-async function report(m, el, btn){
-  const undo = !!m.reported;
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/report", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({id:m.id, undo})
-    });
-    if(!r.ok) throw new Error(await r.text());
-    m.reported = !undo;
-    if(!undo){
-      el.classList.add("leaving");
-      setTimeout(render, 280);
-      LASTREPORT = m;
-      showToast("Marked not important. The classifier will learn from this.");
-    } else {
-      render();
-      showToast("Report withdrawn.", false);
-    }
-  }catch(err){
-    showToast("Could not save that: " + err.message, false);
-    btn.disabled = false;
-  }
-}
-
-let toastTimer = null;
-function showToast(msg, undoable = true){
-  $("#toastmsg").textContent = msg;
-  $("#undo").style.display = undoable ? "" : "none";
-  $("#toast").classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 6000);
-}
-$("#undo").onclick = async () => {
-  if(!LASTREPORT) return;
-  const m = LASTREPORT;
-  await fetch("/api/report", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({id:m.id, undo:true})});
-  m.reported = false; LASTREPORT = null;
-  $("#toast").classList.remove("show");
-  render();
-};
-
-// --- wiring ---------------------------------------------------------------
-document.querySelectorAll(".tab").forEach(t => {
-  t.onclick = () => { FILTER = t.dataset.f; render(); };
-});
-$("#q").oninput = e => { QUERY = e.target.value; render(); };
-$("#refresh").onclick = load;
-$("#theme").onclick = () => {
-  const cur = document.documentElement.getAttribute("data-theme");
-  const next = cur === "dark" ? "light" : cur === "light" ? "dark"
-    : (matchMedia("(prefers-color-scheme:dark)").matches ? "light" : "dark");
-  document.documentElement.setAttribute("data-theme", next);
-  try{ localStorage.setItem("mf-theme", next); }catch(e){}
-};
-try{
-  const saved = localStorage.getItem("mf-theme");
-  if(saved) document.documentElement.setAttribute("data-theme", saved);
-}catch(e){}
-
-async function load(){
-  try{
-    const r = await fetch("/api/mails");
-    const data = await r.json();
-    MAILS = data.mails || [];
-    const shown = MAILS.filter(m => m.category !== "Ignore" && !m.reported).length;
-    const gen = data.generated_at ? new Date(data.generated_at) : null;
-    $("#sub").textContent =
-      `${shown} mail${shown===1?"":"s"} worth your attention` +
-      (gen ? ` · updated ${when(data.generated_at)}` : "");
-    render();
-  }catch(err){
-    $("#sub").textContent = "Could not read the digest: " + err.message;
-  }
-}
-load();
-</script>
-</body>
-</html>
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -634,10 +375,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/":
-            return self._send(200, PAGE)
+            return self._send(200, page())
 
         if path == "/api/mails":
             return self._json(200, mails_for_ui())
+
+        if path == "/api/courses":
+            import courses
+            return self._json(200, {"courses": courses.registry_for_ui()})
+
+        if path == "/api/calendar":
+            params = urllib.parse.parse_qs(parsed.query)
+            today = datetime.now(timezone.utc).date()
+            try:
+                start = datetime.strptime(
+                    params.get("from", [""])[0], "%Y-%m-%d").date()
+            except ValueError:
+                start = today - timedelta(days=31)
+            try:
+                end = datetime.strptime(
+                    params.get("to", [""])[0], "%Y-%m-%d").date()
+            except ValueError:
+                end = today + timedelta(days=62)
+            if end < start:
+                start, end = end, start
+            if (end - start).days > 400:
+                end = start + timedelta(days=400)
+            return self._json(200, {"entries": calendar_entries(start, end)})
 
         if path.startswith("/original/"):
             mail_id = urllib.parse.unquote(path[len("/original/"):])
@@ -658,7 +422,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, "<p>Not found.</p>")
 
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path != "/api/report":
+        path = urllib.parse.urlparse(self.path).path
+        if path not in ("/api/report", "/api/important", "/api/ask"):
             return self._json(404, {"error": "not found"})
 
         try:
@@ -670,14 +435,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            mail_id = payload["id"]
-        except (ValueError, KeyError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"error": "expected JSON"})
+
+        # Ask carries a question, not a mail id, so it is routed before the
+        # id check the other two endpoints need.
+        if path == "/api/ask":
+            status, body = _ask(payload)
+            return self._json(status, body)
+
+        mail_id = payload.get("id")
+        if not mail_id:
             return self._json(400, {"error": "expected JSON with an id"})
 
-        ok, detail = add_report(mail_id, undo=bool(payload.get("undo")))
+        if path == "/api/important":
+            ok, detail = mark_important(mail_id, undo=bool(payload.get("undo")))
+        else:
+            ok, detail = add_report(mail_id, undo=bool(payload.get("undo")))
         if not ok:
             return self._json(404, {"error": detail})
-        return self._json(200, {"ok": True, "reports": detail})
+        return self._json(200, {"ok": True, "count": detail})
+
+
+def _ask(payload):
+    """Answer a question from the store. Returns (status, body)."""
+    import qa
+
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        return 400, {"error": "expected a question"}
+    if len(question) > 500:
+        question = question[:500]
+
+    try:
+        client, model = model_client()
+    except Exception as exc:  # noqa: BLE001
+        return 200, {"ok": False, "sources": [],
+                     "answer": "Could not reach the local model ({}).".format(exc)}
+
+    result = qa.ask(client, model, load_store()["mails"], question)
+    return 200, result
 
 
 def free_port(preferred):
