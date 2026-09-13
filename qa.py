@@ -26,6 +26,10 @@ ANSWER_SCHEMA = {
         "answer": {"type": "string"},
         "sources": {"type": "array", "items": {"type": "integer"}},
         "found": {"type": "boolean"},
+        # True when the answer rests on the given facts (profile, timetable,
+        # teachers, ID rows in attachments, the student's notes) rather than on
+        # a numbered email. Only honoured in the chat, and labelled there.
+        "from_known_facts": {"type": "boolean"},
     },
     "required": ["answer", "sources", "found"],
     "additionalProperties": False,
@@ -33,6 +37,10 @@ ANSWER_SCHEMA = {
 
 MAX_CONTEXT_MAILS = 8
 MAX_BODY_CHARS = 1500
+# Per attached file, and at most two files per email, so a long PDF cannot
+# crowd the other emails (or the rules) out of the context window.
+MAX_ATTACHMENT_CHARS = 1200
+MAX_ATTACHMENTS_PER_BLOCK = 2
 MAX_QUESTION_CHARS = 500
 
 # Chat keeps the last few turns so follow-ups work ("when is it?"). The cap is
@@ -94,12 +102,17 @@ def overlap_score(mail, question_words):
     summary = keywords(mail.get("summary"))
     body = keywords(mail.get("body_text") or mail.get("snippet"))
     sender = keywords(mail.get("from"))
+    attached = [a for a in mail.get("attachments") or [] if isinstance(a, dict)]
+    attached_names = keywords(" ".join(a.get("filename") or "" for a in attached))
+    attached_text = keywords(" ".join((a.get("text") or "")[:4000] for a in attached))
 
     score = (
         4.0 * len(question_words & subject)
         + 2.0 * len(question_words & summary)
         + 1.0 * len(question_words & body)
         + 1.5 * len(question_words & sender)
+        + 3.0 * len(question_words & attached_names)
+        + 1.0 * len(question_words & attached_text)
     )
     for code in mail.get("courses") or []:
         if keywords(code) & question_words:
@@ -171,10 +184,20 @@ def email_blocks(context):
                                     " at " + e["start_time"] if e.get("start_time") else "")
                 for e in events
             ) + "\n"
+        attached = ""
+        for att in [a for a in mail.get("attachments") or []
+                    if isinstance(a, dict)][:MAX_ATTACHMENTS_PER_BLOCK]:
+            name = att.get("filename", "")
+            if att.get("text"):
+                attached += "\nattached file: {}\n{}".format(
+                    name, att["text"][:MAX_ATTACHMENT_CHARS])
+            elif att.get("error"):
+                attached += "\nattached file: {} (could not be read: {})".format(
+                    name, att["error"])
         blocks.append(
-            "[{}]\nfrom: {}\ndate: {}\nsubject: {}\n{}{}".format(
+            "[{}]\nfrom: {}\ndate: {}\nsubject: {}\n{}{}{}".format(
                 position, mail.get("from", ""), mail.get("date", ""),
-                mail.get("subject", ""), event_line, body)
+                mail.get("subject", ""), event_line, body, attached)
         )
     return "\n\n".join(blocks) if blocks else "(no emails matched)"
 
@@ -316,10 +339,22 @@ def shape_reply(data, context, conversational=False):
                     "from": mail.get("from", ""),
                     "date": mail.get("date", ""),
                     "received_at": mail.get("received_at", ""),
+                    # So "send me the handout" can be answered with the file.
+                    "attachments": [
+                        {"index": a.get("index", i), "filename": a.get("filename", ""),
+                         "size": a.get("size", 0), "kind": a.get("kind", "")}
+                        for i, a in enumerate(mail.get("attachments") or [])
+                        if isinstance(a, dict) and a.get("path")],
                 })
 
     # The core refusal: a positive answer that cites nothing is not shown.
     if found and not cited:
+        if conversational and data.get("from_known_facts") is True:
+            # Answered from the profile, timetable, teachers, ID rows or the
+            # student's own notes. Those were handed to the model as facts;
+            # the page labels the answer as coming from them, not from mail.
+            return {"ok": True, "found": True, "from_known_facts": True,
+                    "sources": [], "answer": answer}
         if conversational and not context:
             # No mail was retrieved this turn, so there was nothing it could
             # have cited. Chat, not a suppressed answer.
@@ -368,9 +403,14 @@ Today is {today}.
 
 Rules, in order of importance:
 1. Anything you state about this student - their courses, dates, deadlines,
-   marks, who sent what - must come from a numbered email below. Put the
-   numbers you used in "sources". An answer with "found": true and no sources
-   is discarded, so cite what you used.
+   marks, rooms, who sent what - must come from a numbered email below or from
+   the facts given further down (their profile, timetable, teachers, rows that
+   contain their ID in attached documents, and their own notes). Put the email
+   numbers you used in "sources". If the answer rests on the given facts
+   instead, set "from_known_facts" to true. An answer with "found": true, no
+   sources and "from_known_facts" false is discarded.
+   When they ask you to send or share a document, cite the email it is
+   attached to - the page offers the file for download from there.
 2. If the emails do not contain the answer, set "found" to false and say so
    plainly. Never fill the gap with general knowledge: you know nothing about
    this student beyond these emails.
@@ -507,6 +547,18 @@ def known_facts(mails=None, now=None):
     try:
         import courses
         blocks.append(courses.timetable_block(now.date()))
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        import attachments
+        blocks.append(attachments.facts_block(mails))
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        import user_notes
+        blocks.append(user_notes.facts_block())
     except Exception:  # noqa: BLE001
         pass
 

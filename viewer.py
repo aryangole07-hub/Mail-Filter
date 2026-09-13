@@ -187,6 +187,14 @@ def mails_for_ui():
                 and m["id"] not in marked
             ),
             "has_body": bool(m.get("body_html") or m.get("body_text")),
+            "attachments": [
+                {"index": a.get("index", i), "filename": a.get("filename", ""),
+                 "size": a.get("size", 0), "kind": a.get("kind", ""),
+                 "error": a.get("error", ""),
+                 "matches": len(a.get("matches") or []),
+                 "downloadable": bool(a.get("path"))}
+                for i, a in enumerate(m.get("attachments") or [])
+                if isinstance(a, dict)],
         })
     return {"generated_at": store.get("generated_at"), "mails": out}
 
@@ -233,40 +241,32 @@ def chat_model():
     return _CHAT_MODEL
 
 
-def calendar_entries(start_date, end_date):
-    """Timetable classes plus every dated thing found in mail, in one list."""
-    import courses
-
-    entries = list(courses.classes_between(start_date, end_date))
-
+def hidden_mail_ids():
+    """Mail that is filtered away and must not feed the calendar."""
     reported = reported_ids()
     marked = important_ids()
+    hidden = set()
     for mail in load_store()["mails"]:
         if not isinstance(mail, dict):
             continue
-        hidden = (
-            mail.get("category") == "Ignore" or mail.get("id") in reported
-        ) and not (mail.get("absolute") or mail.get("id") in marked)
-        if hidden:
-            continue
-        for event in mail.get("events") or []:
-            if not isinstance(event, dict) or not event.get("date"):
-                continue
-            try:
-                when = datetime.strptime(event["date"], "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            if not (start_date <= when <= end_date):
-                continue
-            entry = dict(event)
-            entry["source"] = "mail"
-            entry["mail_id"] = mail.get("id")
-            entry["mail_subject"] = mail.get("subject", "")
-            entry["courses"] = mail.get("courses") or []
-            entries.append(entry)
+        if (mail.get("category") == "Ignore" or mail.get("id") in reported) \
+                and not (mail.get("absolute") or mail.get("id") in marked):
+            hidden.add(mail.get("id"))
+    return hidden
 
-    entries.sort(key=lambda e: (e.get("date", ""), e.get("start_time") or "99:99"))
-    return entries
+
+def calendar_entries(start_date, end_date):
+    """{"entries": on the calendar, "suggestions": could be added}.
+
+    No timetabled classes any more - the student asked for only what they
+    cannot miss. The rules are in calendar_store.py.
+    """
+    import calendar_store
+
+    entries, suggestions = calendar_store.build(
+        load_store()["mails"], start_date, end_date,
+        hidden_ids=hidden_mail_ids())
+    return {"entries": entries, "suggestions": suggestions}
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +518,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False),
                    "application/json; charset=utf-8")
 
+    def _serve_attachment(self, path):
+        """One stored attachment, as a download.
+
+        Addressed by mail id and position, never by a filename taken from the
+        URL, so a request cannot reach outside attachments/. Everything except
+        PDF is forced to download: an HTML or SVG file out of a stranger's mail
+        opened inline on this origin could script the local API.
+        """
+        import attachments as att
+
+        parts = path[len("/attachment/"):].split("/")
+        if len(parts) != 2 or not parts[1].isdigit():
+            return self._send(404, "<p>Not found.</p>")
+        mail_id, index = urllib.parse.unquote(parts[0]), int(parts[1])
+        mail = next((m for m in load_store()["mails"]
+                     if isinstance(m, dict) and m.get("id") == mail_id), None)
+        entry = next((a for a in (mail or {}).get("attachments") or []
+                      if isinstance(a, dict) and a.get("index") == index
+                      and a.get("path")), None)
+        if not entry:
+            return self._send(404, "<p>That attachment is not stored.</p>")
+
+        full = os.path.realpath(os.path.join(SCRIPT_DIR, entry["path"]))
+        root = os.path.realpath(att.ATTACH_DIR)
+        if not full.startswith(root + os.sep) or not os.path.isfile(full):
+            return self._send(404, "<p>That attachment is not stored.</p>")
+        with open(full, "rb") as fh:
+            data = fh.read()
+
+        filename = entry.get("filename") or "attachment"
+        ascii_name = re.sub(r'[^\w.\- ()]', "_", filename)
+        is_pdf = att.extension(filename) == ".pdf"
+        disposition = "{}; filename=\"{}\"; filename*=UTF-8''{}".format(
+            "inline" if is_pdf else "attachment", ascii_name,
+            urllib.parse.quote(filename))
+        return self._send(
+            200, data, "application/pdf" if is_pdf else "application/octet-stream",
+            extra={"Content-Disposition": disposition,
+                   "Content-Security-Policy": "default-src 'none'; sandbox",
+                   "Cache-Control": "no-store"})
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -531,6 +572,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/fetch":
             # Polled by the page while a check is running.
             return self._json(200, fetch_state())
+
+        if path == "/api/notes":
+            import user_notes
+            return self._json(200, {"notes": user_notes.load()})
+
+        if path.startswith("/attachment/"):
+            return self._serve_attachment(path)
 
         if path == "/api/courses":
             import courses
@@ -553,7 +601,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 start, end = end, start
             if (end - start).days > 400:
                 end = start + timedelta(days=400)
-            return self._json(200, {"entries": calendar_entries(start, end)})
+            return self._json(200, calendar_entries(start, end))
 
         if path.startswith("/original/"):
             mail_id = urllib.parse.unquote(path[len("/original/"):])
@@ -582,7 +630,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             state["started"] = started
             return self._json(200, state)
 
-        if path not in ("/api/report", "/api/important", "/api/ask"):
+        if path not in ("/api/report", "/api/important", "/api/ask",
+                        "/api/notes", "/api/notes/delete",
+                        "/api/calendar/add", "/api/calendar/remove"):
             return self._json(404, {"error": "not found"})
 
         try:
@@ -602,6 +652,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/ask":
             status, body = _ask(payload)
             return self._json(status, body)
+
+        if path == "/api/notes":
+            import user_notes
+            note = user_notes.add(str(payload.get("text") or ""))
+            if not note:
+                return self._json(400, {"error": "a note needs some text"})
+            return self._json(200, {"ok": True, "note": note})
+
+        if path == "/api/notes/delete":
+            import user_notes
+            ok = user_notes.delete(str(payload.get("id") or ""))
+            return self._json(200 if ok else 404, {"ok": ok})
+
+        if path in ("/api/calendar/add", "/api/calendar/remove"):
+            import calendar_store
+            keys = payload.get("keys")
+            if isinstance(keys, str):
+                keys = [keys]
+            keys = [k for k in (keys or []) if isinstance(k, str) and "|" in k][:50]
+            if not keys:
+                return self._json(400, {"error": "expected calendar keys"})
+            calendar_store.set_on_calendar(keys, path.endswith("/add"))
+            return self._json(200, {"ok": True})
 
         mail_id = payload.get("id")
         if not mail_id:
@@ -644,7 +717,10 @@ def _ask(payload):
                      "answer": "Could not reach the local model ({}).".format(exc)}
 
     import mail_filter
-    return 200, qa.chat(client, chat_model(), load_store()["mails"], history,
+    # The chat model may be answering from system RAM (see the VRAM guard in
+    # mail_filter.py), which is slow; give it far longer than a digest call.
+    chat_client = mail_filter.OllamaClient(timeout=mail_filter.CHAT_TIMEOUT)
+    return 200, qa.chat(chat_client, chat_model(), load_store()["mails"], history,
                         num_ctx=mail_filter.CHAT_NUM_CTX)
 
 

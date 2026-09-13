@@ -194,6 +194,30 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
   border-radius:999px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer;
   transition:all .15s ease;}
 .starter:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px);}
+/* attachments */
+.attrow{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 4px;}
+.att{font-size:12px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;
+  color:var(--ink);text-decoration:none;background:var(--panel);max-width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.att:hover{border-color:var(--accent);color:var(--accent);}
+/* calendar entries */
+.kindtag{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+  margin-right:7px;padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent);}
+.kindtag.exam,.kindtag.deadline{background:color-mix(in srgb,var(--danger) 16%,transparent);color:var(--danger);}
+.evdetails{font-size:13px;margin-top:4px;line-height:1.5;}
+.evlinks,.evsrc{font-size:12px;color:var(--muted);margin-top:5px;display:flex;gap:6px;
+  flex-wrap:wrap;align-items:center;}
+.evlinks a{color:var(--accent);}
+.btn.small{padding:3px 8px;font-size:12px;}
+.suggest{margin-top:8px}
+/* notes */
+.notebox{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
+.notebox textarea{flex:1 1 320px;background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  border-radius:11px;padding:11px 13px;font:inherit;font-size:14px;resize:vertical;}
+.note{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:11px 13px;margin-bottom:8px;}
+.notebody{white-space:pre-wrap;font-size:14px;line-height:1.55;}
+.notemeta{display:flex;justify-content:space-between;align-items:center;font-size:12px;
+  color:var(--muted);margin-top:6px;}
 .askbox{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
 .askbox input{flex:1 1 300px;background:var(--panel);border:1px solid var(--line);
   color:var(--ink);border-radius:11px;padding:12px 14px;font:inherit;font-size:14.5px;}
@@ -269,6 +293,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     <button data-v="mail" aria-selected="true">Mail</button>
     <button data-v="calendar" aria-selected="false">Calendar</button>
     <button data-v="ask" aria-selected="false">Ask</button>
+    <button data-v="notes" aria-selected="false">Notes</button>
   </nav>
 
   <!-- MAIL -->
@@ -312,11 +337,11 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     <div class="grid" id="dow"></div>
     <div class="grid" id="calgrid" style="margin-top:6px"></div>
     <div class="legend">
-      <span><i style="background:color-mix(in srgb,var(--other) 40%,transparent)"></i>Timetabled class</span>
-      <span><i style="background:color-mix(in srgb,var(--fests) 55%,transparent)"></i>From your mail</span>
-      <span><i style="background:color-mix(in srgb,var(--danger) 55%,transparent)"></i>Exam or deadline</span>
+      <span><i style="background:color-mix(in srgb,var(--danger) 55%,transparent)"></i>Quiz, exam or something due</span>
+      <span><i style="background:color-mix(in srgb,var(--fests) 55%,transparent)"></i>Something you added</span>
     </div>
     <div class="daydetail" id="daydetail"></div>
+    <div class="suggest" id="suggest"></div>
   </section>
 
   <!-- ASK -->
@@ -327,6 +352,16 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
       <button class="btn primary" id="askbtn">Send</button>
       <button class="btn ghost" id="newchat" title="Start a new conversation">New chat</button>
     </div>
+  </section>
+
+  <!-- NOTES -->
+  <section id="v-notes" class="hidden">
+    <p class="hint" style="margin-top:0">Tell the chat what is not in any email - what a professor said in class, a room that changed, portions announced out loud. It reads every note on every question.</p>
+    <div class="notebox">
+      <textarea id="notetext" rows="3" placeholder="e.g. FoFA quiz 2 covers chapters 3 to 5 only (said in class, 14 Sep)"></textarea>
+      <button class="btn primary" id="noteadd">Save note</button>
+    </div>
+    <div id="notelist"></div>
   </section>
 </div>
 
@@ -347,7 +382,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 <script>
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
-let MAILS=[], COURSES=[], ENTRIES=[], VIEW="mail", FILTER="all", QUERY="";
+let MAILS=[], COURSES=[], ENTRIES=[], SUGGESTIONS=[], VIEW="mail", FILTER="all", QUERY="";
 let COURSEF=new Set(), DMODE="any", D1="", D2="";
 let CURRENT=null, LASTACTION=null, CALMONTH=null, SELDAY=null;
 
@@ -454,6 +489,7 @@ function card(m,i){
       ${shield}${evs}
     </div>
     ${summary}
+    ${(m.attachments||[]).some(a=>a.downloadable)?`<div class="attrow">${attChips(m.id,m.attachments.filter(a=>a.downloadable))}</div>`:""}
     <div class="actions">
       <button class="btn primary" data-a="open">Original</button>
       ${action}
@@ -530,20 +566,13 @@ function renderCal(){
       +(s===todayS?" today":"")+(s===SELDAY?" sel":"");
     cell.innerHTML=`<div class="daynum">${d.getDate()}</div>`;
     const list=(byDay[s]||[]);
-    const mails=list.filter(e=>e.source==="mail");
-    const classes=list.filter(e=>e.source==="timetable");
-    for(const e of mails.slice(0,3)){
+    for(const e of list.slice(0,3)){
       const p=document.createElement("div");
       p.className="pill "+(["exam","deadline"].includes(e.kind)?e.kind:"mail");
       p.textContent=(e.start_time?e.start_time+" ":"")+e.title;
       p.title=e.title; cell.appendChild(p);
     }
-    if(classes.length && mails.length<3){
-      const p=document.createElement("div"); p.className="pill class";
-      p.textContent=classes.length+" class"+(classes.length>1?"es":"");
-      cell.appendChild(p);
-    }
-    const extra=list.length-Math.min(mails.length,3)-(classes.length?1:0);
+    const extra=list.length-Math.min(list.length,3);
     if(extra>0){ const e2=document.createElement("div"); e2.className="more";
       e2.textContent="+"+extra+" more"; cell.appendChild(e2); }
     cell.onclick=()=>{ SELDAY=s; renderCal(); };
@@ -551,29 +580,71 @@ function renderCal(){
   }
   renderDay();
 }
-function renderDay(){
-  const box=$("#daydetail");
-  if(!SELDAY){ box.innerHTML=`<p class="hint">Pick a day to see everything on it.</p>`; return; }
-  const list=ENTRIES.filter(e=>e.date===SELDAY);
-  const d=new Date(SELDAY+"T00:00:00");
-  let html=`<div class="sectitle">${d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"})} · ${list.length}</div>`;
-  if(!list.length) html+=`<p class="hint">Nothing scheduled.</p>`;
-  for(const e of list){
-    const meta=[e.location,(e.profs||[]).join(", "),e.section,
-      e.source==="mail"?"from mail":""].filter(Boolean).join(" · ");
-    html+=`<div class="evrow">
-      <div class="evtime">${esc(e.start_time||"—")}</div>
-      <div class="evbody">
-        <div class="evtitle">${esc(e.title)}</div>
-        <div class="evmeta">${esc(meta)}</div>
-      </div>
-      ${e.mail_id?`<button class="btn" data-open="${esc(e.mail_id)}">Mail</button>`:""}
-    </div>`;
-  }
-  box.innerHTML=html;
+/* The calendar holds only what cannot be missed: quizzes/exams (with their
+   portions) and things due (with where the instructions are and the mail they
+   came from). Everything else found in mail is listed under it with Add to
+   cal; anything on it can be taken off. */
+function kindLabel(k){ return k==="exam"?"Quiz / exam":k==="deadline"?"Due":"Event"; }
+function shortUrl(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return u; } }
+function evRow(e,onCal,timeLabel){
+  const meta=[e.location,(e.courses||[]).map(courseLabel).join(", ")].filter(Boolean).join(" · ");
+  const links=(e.links||[]).map(u=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a>`).join("");
+  const srcs=(e.sources||[]).map(s=>`<button class="btn ghost small" data-open="${esc(s.mail_id)}">${esc(s.subject||"Mail")}</button>`).join("");
+  return `<div class="evrow">
+    <div class="evtime">${esc(timeLabel||e.start_time||"—")}</div>
+    <div class="evbody">
+      <div class="evtitle"><span class="kindtag ${esc(e.kind)}">${kindLabel(e.kind)}</span>${esc(e.title)}</div>
+      ${meta?`<div class="evmeta">${esc(meta)}</div>`:""}
+      ${e.details?`<div class="evdetails">${esc(e.details)}</div>`:""}
+      ${links?`<div class="evlinks">Instructions: ${links}</div>`:""}
+      ${srcs?`<div class="evsrc">From: ${srcs}</div>`:""}
+    </div>
+    <button class="btn ${onCal?"ghost":"good"} small" data-cal="${onCal?"remove":"add"}"
+      data-keys="${esc(JSON.stringify(e.keys||[]))}">${onCal?"Remove from cal":"Add to cal"}</button>
+  </div>`;
+}
+function wireEvRows(box){
   box.querySelectorAll("[data-open]").forEach(b=>{
     b.onclick=()=>{ const m=MAILS.find(x=>x.id===b.dataset.open); if(m) openOriginal(m); };
   });
+  box.querySelectorAll("[data-cal]").forEach(b=>{
+    b.onclick=async()=>{
+      b.disabled=true;
+      try{
+        const r=await fetch("/api/calendar/"+b.dataset.cal,{method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({keys:JSON.parse(b.dataset.keys)})});
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        showToast(b.dataset.cal==="add"?"Added to your calendar.":"Taken off your calendar.",false);
+        await loadCalendar();
+      }catch(err){ showToast("Could not change the calendar: "+err.message,false); b.disabled=false; }
+    };
+  });
+}
+function renderDay(){
+  const box=$("#daydetail");
+  if(!SELDAY){ box.innerHTML=`<p class="hint">Pick a day to see what is due.</p>`; renderSuggestions(); return; }
+  const list=ENTRIES.filter(e=>e.date===SELDAY);
+  const d=new Date(SELDAY+"T00:00:00");
+  let html=`<div class="sectitle">${d.toLocaleDateString(undefined,{weekday:"long",day:"numeric",month:"long"})} · ${list.length}</div>`;
+  if(!list.length) html+=`<p class="hint">Nothing you cannot miss on this day.</p>`;
+  for(const e of list) html+=evRow(e,true);
+  box.innerHTML=html;
+  wireEvRows(box);
+  renderSuggestions();
+}
+function renderSuggestions(){
+  const box=$("#suggest");
+  const todayS=ymd(new Date());
+  const list=SUGGESTIONS.filter(e=>e.date>=todayS).slice(0,30);
+  if(!list.length){ box.innerHTML=""; return; }
+  let html=`<div class="sectitle">In your mail, not on your calendar · ${list.length}</div>`;
+  for(const e of list){
+    const d=new Date(e.date+"T00:00:00").toLocaleDateString(undefined,{day:"numeric",month:"short"});
+    html+=evRow(e,false,d+(e.start_time?" "+e.start_time:""));
+  }
+  box.innerHTML=html;
+  wireEvRows(box);
 }
 
 /* ---- ask: a conversation with the local model ----
@@ -598,13 +669,17 @@ function fmtChat(text){
     .replace(/^\s*[*-]\s+/gm,"• ");
 }
 
+function attChips(mailId,atts){
+  return (atts||[]).map(a=>`<a class="att" href="/attachment/${encodeURIComponent(mailId)}/${a.index}"
+    title="Download ${esc(a.filename)}">📎 ${esc(a.filename)}</a>`).join("");
+}
 function srcRows(sources){
   return (sources||[]).map((s,i)=>`
     <div class="src" data-open="${esc(s.id)}">
       <span class="n">${i+1}</span>
       <span class="s">${esc(s.subject)}</span>
       <span class="d">${esc(when(s.received_at,s.date))}</span>
-    </div>`).join("");
+    </div>${(s.attachments||[]).length?`<div class="attrow">${attChips(s.id,s.attachments)}</div>`:""}`).join("");
 }
 
 function renderChat(){
@@ -632,7 +707,9 @@ function renderChat(){
       <div class="bub ai${t.found?"":" notfound"}">${fmtChat(t.content||"No answer.")}</div>
       ${rows
         ? `<div class="srctitle">From these emails</div>${rows}`
-        : `<div class="hint">Nothing here was traced to an email.</div>`}
+        : t.from_known_facts
+          ? `<div class="hint">From your profile, timetable, teachers, attached documents or your notes - not from one specific email.</div>`
+          : `<div class="hint">Nothing here was traced to an email.</div>`}
     </div>`;
   }).join("");
   box.querySelectorAll("[data-open]").forEach(b=>{
@@ -655,7 +732,8 @@ async function doAsk(){
       body:JSON.stringify({messages:history})});
     const d=await r.json();
     CHAT[CHAT.length-1]={role:"assistant",content:d.answer||"No answer.",
-                         sources:d.sources||[],found:!!d.found};
+                         sources:d.sources||[],found:!!d.found,
+                         from_known_facts:!!d.from_known_facts};
   }catch(err){
     CHAT[CHAT.length-1]={role:"assistant",content:"Could not ask: "+err.message,
                          sources:[],found:false};
@@ -664,6 +742,44 @@ async function doAsk(){
   saveChat();
   renderChat();
   $("#qq").focus();
+}
+
+/* ---- notes: what the student knows that no email says ---- */
+async function loadNotes(){
+  try{
+    const d=await (await fetch("/api/notes")).json();
+    renderNotes(d.notes||[]);
+  }catch(err){ $("#notelist").innerHTML=`<p class="hint">Could not load notes: ${esc(err.message)}</p>`; }
+}
+function renderNotes(notes){
+  const box=$("#notelist");
+  if(!notes.length){ box.innerHTML=`<p class="hint">No notes yet.</p>`; return; }
+  box.innerHTML=notes.slice().reverse().map(n=>`<div class="note">
+      <div class="notebody">${esc(n.text)}</div>
+      <div class="notemeta"><span>${esc(when(n.created_at,""))}</span>
+        <button class="btn ghost small" data-del="${esc(n.id)}">Delete</button></div>
+    </div>`).join("");
+  box.querySelectorAll("[data-del]").forEach(b=>{
+    b.onclick=async()=>{
+      b.disabled=true;
+      await fetch("/api/notes/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({id:b.dataset.del})});
+      loadNotes();
+    };
+  });
+}
+async function addNote(){
+  const text=$("#notetext").value.trim(); if(!text) return;
+  $("#noteadd").disabled=true;
+  try{
+    const r=await fetch("/api/notes",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text})});
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    $("#notetext").value="";
+    showToast("Saved. The chat uses it from your next question.",false);
+    loadNotes();
+  }catch(err){ showToast("Could not save the note: "+err.message,false); }
+  $("#noteadd").disabled=false;
 }
 
 function newChat(){
@@ -748,6 +864,8 @@ $$("nav.views button").forEach(b=>{
     $("#v-mail").classList.toggle("hidden",VIEW!=="mail");
     $("#v-calendar").classList.toggle("hidden",VIEW!=="calendar");
     $("#v-ask").classList.toggle("hidden",VIEW!=="ask");
+    $("#v-notes").classList.toggle("hidden",VIEW!=="notes");
+    if(VIEW==="notes"){ loadNotes(); }
     if(VIEW==="calendar"){ loadCalendar(); }
     if(VIEW==="ask"){ $("#qq").focus(); }
   };
@@ -779,6 +897,7 @@ document.addEventListener("keydown",e=>{
 });
 $("#askbtn").onclick=doAsk;
 $("#newchat").onclick=newChat;
+$("#noteadd").onclick=addNote;
 $("#qq").addEventListener("keydown",e=>{ if(e.key==="Enter") doAsk(); });
 renderChat();
 $("#prev").onclick=()=>{ CALMONTH.setMonth(CALMONTH.getMonth()-1); loadCalendar(); };
@@ -836,8 +955,9 @@ async function loadCalendar(){
   const to=new Date(base.getFullYear(),base.getMonth()+2,0);
   try{
     const r=await fetch(`/api/calendar?from=${ymd(from)}&to=${ymd(to)}`);
-    ENTRIES=(await r.json()).entries||[];
-  }catch(e){ ENTRIES=[]; }
+    const data=await r.json();
+    ENTRIES=data.entries||[]; SUGGESTIONS=data.suggestions||[];
+  }catch(e){ ENTRIES=[]; SUGGESTIONS=[]; }
   renderCal();
 }
 

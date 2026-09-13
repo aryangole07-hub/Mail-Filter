@@ -201,6 +201,55 @@ The conversation lives in the page (and in `sessionStorage`), never on disk -
 **New chat** clears it. Nothing about any of this leaves the machine: the mail
 and the model are both local.
 
+The chat also knows, on every question: your profile (`profile.py`), who
+teaches each course, your weekly timetable, every row in an attached document
+that contains your ID, and your notes. Answers that come from those rather than
+from one email are labelled as such under the reply.
+
+## Attachments
+
+Spreadsheets (.xlsx, .xls, .csv, .tsv), Word files (.docx, tables included),
+PDFs, PowerPoint (.pptx) and text files (.txt, .tst, .md, .json, .ics, .xml,
+.html) are downloaded with the mail, stored under `attachments/` (gitignored)
+and read. Any row or line containing your campus ID or mail login is pulled out
+exactly - that is how "which room is my exam in" is answered from a seating
+plan with thousands of rows. Ask for a document ("send me the FoFA handout")
+and the reply offers the file for download.
+
+For mail that arrived before this existed:
+
+```powershell
+.\.venv\Scripts\python.exe mail_filter.py --attachments        # last 60 days
+.\.venv\Scripts\python.exe mail_filter.py --attachments 120    # or longer
+```
+
+## Notes
+
+The **Notes** tab is for what no email says - what a professor announced in
+class, a room that changed, portions given out loud. Every note is given to the
+chat on every question. Stored in `user_notes.json` (gitignored).
+
+## Calendar
+
+Only what you cannot miss: quizzes and exams (with their portions) and things
+that are due (with the link to the instructions and the mail they came from).
+No timetabled classes. The same assignment mentioned in several reminders is one
+entry. Anything else with a date in your mail is listed under the month with
+**Add to cal**; anything on the calendar has **Remove from cal**. Your choices
+are kept in `calendar_overrides.json` (gitignored).
+
+## GPU safety
+
+The GPU that runs the models also drives the display, and filling its VRAM once
+made the monitor lose signal. Three guards now stop that:
+
+- Ollama reserves 6 GB it will never use (`OLLAMA_GPU_OVERHEAD`) and keeps only
+  one model loaded (`OLLAMA_MAX_LOADED_MODELS=1`);
+- before loading a model, Mail Filter checks free VRAM and runs the model on
+  the CPU instead if the GPU cannot take it with
+  `MAIL_FILTER_VRAM_RESERVE_GB` (default 6) to spare - GPU first, CPU fallback;
+- the big chat model is opt-in only (`MAIL_FILTER_CHAT_MODEL`).
+
 The server binds to `127.0.0.1`, so the site is reachable only from this
 computer. Your mail is never uploaded anywhere.
 

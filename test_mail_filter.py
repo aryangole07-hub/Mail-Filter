@@ -17,6 +17,9 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mail_filter as m
+# Deterministic regardless of this machine's Ollama settings: by default the
+# tests exercise Mail Filter's own VRAM estimate, not a reserve Ollama keeps.
+m.ollama_reserve_gb = lambda: 0.0
 
 now = datetime.now(timezone.utc)
 PASSED, FAILED = [], []
@@ -713,8 +716,12 @@ class StubOllama(m.OllamaClient):
 st = StubOllama()
 st.create("gemma3:4b", 512, [{"role": "user", "content": "hi"}],
           {"format": {"type": "json_schema", "schema": m.CLASSIFICATION_SCHEMA}})
-path, payload = st.sent[0]
+_chat_calls = [p for p in st.sent if p[0] == "/api/chat"]
+path, payload = _chat_calls[0] if _chat_calls else st.sent[-1]
 check("chat goes to /api/chat", path == "/api/chat", path)
+# The VRAM guard looks at what is loaded before anything new is asked to load.
+check("free VRAM is checked before the model is asked to load",
+      [p[0] for p in st.sent][:1] == ["/api/ps"], [p[0] for p in st.sent])
 check("schema is passed to Ollama as `format`",
       payload["format"] == m.CLASSIFICATION_SCHEMA)
 check("streaming is off", payload["stream"] is False)
@@ -728,7 +735,8 @@ check("keep_alive is short, not indefinite",
 # would reject.
 st2 = StubOllama()
 st2.create("gemma3:4b", 64, [{"role": "user", "content": "hi"}])
-check("no schema means no `format` key", "format" not in st2.sent[0][1])
+check("no schema means no `format` key",
+      "format" not in [p for p in st2.sent if p[0] == "/api/chat"][0][1])
 
 trunc = StubOllama({"message": {"content": "{}"}, "done_reason": "length"})
 check("Ollama's 'length' maps to the caller's 'max_tokens'",
@@ -1100,6 +1108,73 @@ check("'of course' in prose is not a course",
                             "courses": []}))
 
 
+section("VRAM guard - GPU first, never at the display's expense")
+
+_GB = 1024 ** 3
+check("with plenty of VRAM free the GPU is used",
+      m.gpu_has_room(int(3.3 * _GB), 8192, (2.0, 20.0), reserve_gb=6) is True)
+# The incident: a 15 GB model beside a loaded one, 16k context, on the 20 GB
+# card that drives the display.
+check("a 15 GB model beside a loaded one is sent to the CPU",
+      m.gpu_has_room(15 * _GB, 16384, (3.5, 20.0), reserve_gb=6) is False)
+check("unknown VRAM falls back to Ollama's own GPU-first behaviour",
+      m.gpu_has_room(15 * _GB, 16384, None) is True)
+check("an unknown model size is not guessed at",
+      m.gpu_has_room(0, 8192, (19.0, 20.0)) is True)
+
+
+class _PsStub(m.OllamaClient):
+    def __init__(self, ps, tags):
+        super().__init__()
+        self.ps, self.tags = ps, tags
+
+    def _request(self, path, payload=None, timeout=None):
+        return self.ps if path == "/api/ps" else self.tags
+
+
+class _DownStub(m.OllamaClient):
+    def _request(self, *a, **k):
+        raise RuntimeError("ollama is down")
+
+
+_real_vram = m.read_vram_status
+try:
+    m.read_vram_status = lambda: (4.0, 20.0)
+    _big = _PsStub({"models": []},
+                   {"models": [{"name": "huge:26b", "size": 15 * _GB}]})
+    check("a load that would starve the display is kept on the CPU",
+          _big._placement_options("huge:26b", 16384) == {"num_gpu": 0})
+    _small = _PsStub({"models": []},
+                     {"models": [{"name": "gemma3:4b", "size": int(3.3 * _GB)}]})
+    check("a model that fits goes to the GPU",
+          _small._placement_options("gemma3:4b", 8192) == {})
+    _warm = _PsStub({"models": [{"name": "huge:26b", "size_vram": 1}]},
+                    {"models": [{"name": "huge:26b", "size": 15 * _GB}]})
+    check("a model already on the GPU is not moved off it",
+          _warm._placement_options("huge:26b", 8192) == {})
+    check("the guard never breaks a run when Ollama misbehaves",
+          _DownStub()._placement_options("x", 8192) == {})
+
+    # With OLLAMA_GPU_OVERHEAD set, Ollama keeps the reserve itself and fits
+    # the model around it - the 26B model then runs on the GPU, not the CPU.
+    _no_reserve = m.ollama_reserve_gb
+    try:
+        m.ollama_reserve_gb = lambda: 6.0
+        _trusting = _PsStub({"models": []},
+                            {"models": [{"name": "huge:26b", "size": 15 * _GB}]})
+        check("when Ollama keeps the reserve itself, its own fitter decides",
+              _trusting._placement_options("huge:26b", 12288) == {})
+        m.ollama_reserve_gb = lambda: 2.0
+        _thin = _PsStub({"models": []},
+                        {"models": [{"name": "huge:26b", "size": 15 * _GB}]})
+        check("a reserve smaller than ours is not trusted",
+              _thin._placement_options("huge:26b", 12288) == {"num_gpu": 0})
+    finally:
+        m.ollama_reserve_gb = _no_reserve
+finally:
+    m.read_vram_status = _real_vram
+
+
 section("Summaries - a date the mail never states is not shown")
 
 # The real case: an Unstop mail whose text part is raw HTML. The model only saw
@@ -1287,6 +1362,271 @@ check("the handback mail is still findable when it is what you asked about",
           _exam_mails, "where do I collect my answer script")])
 check("the chat is told an exam date is not a handback date",
       "never offer one of those dates" in qa.CHAT_RULES)
+
+
+section("Attachments - documents are read, and your ID row is found exactly")
+
+import attachments as att_mod
+import calendar_store as cal_mod
+import user_notes as notes_mod
+
+att_mod.ATTACH_DIR = tempfile.mkdtemp()
+_ids = ("2025B3PS0420H", "f20250420")
+
+import openpyxl as _openpyxl
+_book = _openpyxl.Workbook()
+_ws = _book.active
+_ws.title = "Midsem seating"
+_ws.append(["Seating plan - Midsem, 21 Sep"])
+_ws.append(["S.No", "ID No", "Name", "Room", "Seat"])
+for _n in range(1, 400):
+    _ws.append([_n, "2025B3PS%04dH" % _n, "Student %d" % _n, "F10%d" % (_n % 5), _n])
+_ws.append([400, "2025 b3ps 0420h", "Me", "F207", 12])
+_xbuf = io.BytesIO()
+_book.save(_xbuf)
+_x = att_mod.extract("seating.xlsx", "", _xbuf.getvalue(), _ids)
+check("a spreadsheet is read", _x["kind"] == "xlsx" and not _x["error"], _x["error"])
+check("the row with your ID is found among hundreds, spacing and case ignored",
+      len(_x["matches"]) == 1 and _x["matches"][0]["cells"].get("Room") == "F207",
+      _x["matches"])
+check("the match is labelled by the sheet's own column names",
+      _x["matches"][0]["cells"].get("Seat") == "12")
+check("the readable text leads with your row", "rows that contain the student's ID" in _x["text"])
+check("the text stays capped however long the sheet is",
+      len(_x["text"]) <= att_mod.MAX_TEXT_CHARS)
+
+_c = att_mod.extract("marks.csv", "text/csv",
+                     b"id,marks\n2025B3PS0001H,11\n2025B3PS0420H,17\n", _ids)
+check("a CSV row with your ID is found", _c["matches"][0]["cells"]["marks"] == "17")
+
+import docx as _docx
+_d = _docx.Document()
+_d.add_paragraph("Assignment 2: submit a two-page report by 25 September.")
+_t = _d.add_table(rows=2, cols=2)
+_t.cell(0, 0).text, _t.cell(0, 1).text = "ID", "Group"
+_t.cell(1, 0).text, _t.cell(1, 1).text = "f20250420", "G7"
+_dbuf = io.BytesIO()
+_d.save(_dbuf)
+_w = att_mod.extract("brief.docx", "", _dbuf.getvalue(), _ids)
+check("a Word file's text is read", "two-page report" in _w["text"])
+check("a table inside a Word file is searched for your ID too",
+      any(m_.get("cells", {}).get("Group") == "G7" for m_ in _w["matches"]))
+
+# Found in the real inbox: an ERP "Excel" export that is really an HTML page
+# with an .xls name. xlrd rejects it outright.
+_fake_xls = (b"<!DOCTYPE html><html><body><table>"
+             b"<tr><th>ID No</th><th>Name</th><th>Exam Hall</th></tr>"
+             b"<tr><td>2025B3PS0001H</td><td>Someone</td><td>F102</td></tr>"
+             b"<tr><td> 2025B3PS0420H </td><td>Me</td><td>F&amp;G 207</td></tr>"
+             b"</table></body></html>")
+_hx = att_mod.extract("ps (8).xls", "application/vnd.ms-excel", _fake_xls, _ids)
+check("an HTML page saved as .xls is read as the table it is",
+      not _hx["error"] and _hx["matches"]
+      and _hx["matches"][0]["cells"].get("Exam Hall") == "F&G 207",
+      (_hx["error"], _hx["matches"]))
+check("the same holds for an HTML page saved as .xlsx",
+      att_mod.extract("seating.xlsx", "", _fake_xls, _ids)["matches"])
+
+_txt = att_mod.extract("notice.tst", "", b"Room change for 2025B3PS0420H: J217", _ids)
+check("a .tst text file is read and matched", _txt["matches"] and _txt["kind"] == "text")
+check("images are recorded as not read, not silently dropped",
+      att_mod.extract("photo.png", "image/png", b"\x89PNG", _ids)["error"])
+check("a corrupt file records why it could not be read",
+      "could not read" in att_mod.extract("bad.xlsx", "", b"not a zip", _ids)["error"])
+check("a stored filename cannot climb out of the attachments folder",
+      ".." not in att_mod.safe_name("../../evil.pdf")
+      and os.path.dirname(att_mod.storage_path("id1", 0, "../../evil.pdf")).endswith("id1"))
+
+_seat_mail = {"id": "seat", "subject": "Midsem seating arrangement",
+              "received_at": "2026-09-15T08:00:00+00:00", "attachments": [_x]}
+_facts_att = att_mod.facts_block([_seat_mail])
+check("your ID row is handed to the chat as a fact, with the file it came from",
+      "F207" in _facts_att and "seating.xlsx" in _facts_att)
+check("no ID rows means no facts block", att_mod.facts_block([{"attachments": []}]) == "")
+
+# The digest side: parts are found in the Gmail payload and read on arrival.
+_payload = {"mimeType": "multipart/mixed", "parts": [
+    {"mimeType": "text/plain", "body": {"data": ""}},
+    {"filename": "marks.csv", "mimeType": "text/csv",
+     "body": {"size": 40, "data": base64.urlsafe_b64encode(
+         b"id,marks\n2025B3PS0420H,17\n").decode().rstrip("=")}},
+    {"filename": "logo.png", "mimeType": "image/png", "body": {"attachmentId": "x"}},
+]}
+_parts = m.attachment_parts(_payload)
+check("attachment parts are found in the mail tree", [p["filename"] for p in _parts]
+      == ["marks.csv", "logo.png"])
+_got = m.fetch_attachments(None, "msg1", _parts, _ids)
+check("an inline attachment is decoded, stored and read without a Gmail call",
+      len(_got) == 1 and _got[0]["matches"] and os.path.exists(
+          os.path.join(att_mod.ATTACH_DIR, "msg1", "0-marks.csv")), _got)
+check("images are not downloaded at all", all(g["filename"] != "logo.png" for g in _got))
+
+
+class _BadService:
+    def users(self):
+        raise RuntimeError("gmail is down")
+
+
+_failed = m.fetch_attachments(_BadService(), "msg2",
+                              [{"filename": "a.pdf", "mime": "application/pdf",
+                                "size": 10, "attachment_id": "z", "data": ""}], _ids)
+check("a download that fails is recorded, not fatal",
+      len(_failed) == 1 and "could not download" in _failed[0]["error"])
+check("date extraction also reads attached text",
+      "two-page report" in m.with_attachment_text(
+          {"body_text": "see attached", "attachments": [_w]}))
+
+# The chat side.
+_ctx_mail = {"id": "hand", "subject": "Handout for week 3", "from": "p@bits.ac.in",
+             "body_text": "Please find the handout attached.",
+             "received_at": datetime.now(timezone.utc).isoformat(),
+             "attachments": [dict(_w, index=0, path="attachments/hand/0-brief.docx")]}
+check("a question about an attachment's content finds its mail",
+      qa.select_context([_ctx_mail], "two-page report")[0]["id"] == "hand")
+check("attachment text reaches the prompt", "two-page report" in qa.email_blocks([_ctx_mail]))
+_shaped = qa.shape_reply({"answer": "Here it is.", "sources": [1], "found": True},
+                         [_ctx_mail], conversational=True)
+check("a cited mail carries its attachments, so the page can offer the file",
+      _shaped["sources"][0]["attachments"][0]["filename"] == "brief.docx")
+check("the chat is told how to hand over a document",
+      "offers the file for download" in qa.CHAT_RULES)
+
+
+section("Facts and notes - answers that are not from one email")
+
+check("an answer from the timetable or profile is accepted in the chat, labelled",
+      qa.shape_reply({"answer": "Your ID is 2025B3PS0420H.", "sources": [],
+                      "found": True, "from_known_facts": True}, [],
+                     conversational=True).get("from_known_facts") is True)
+check("the one-shot Ask still refuses an uncited answer, facts flag or not",
+      qa.shape_reply({"answer": "It is on Friday.", "sources": [], "found": True,
+                      "from_known_facts": True}, [_ctx_mail])["found"] is False)
+check("a claim with no sources and no facts flag is still refused in the chat",
+      qa.shape_reply({"answer": "It is on Friday.", "sources": [], "found": True},
+                     [_ctx_mail], conversational=True)["found"] is False)
+
+notes_mod.NOTES_FILE = os.path.join(tempfile.mkdtemp(), "user_notes.json")
+check("no notes file is not an error", notes_mod.load() == [])
+_note = notes_mod.add("  FoFA quiz 2 covers chapters 3 to 5 only  ")
+check("a note is saved, trimmed", _note and notes_mod.load()[0]["text"].startswith("FoFA"))
+check("an empty note is refused", notes_mod.add("   ") is None)
+check("notes reach the chat as the student's own words",
+      "chapters 3 to 5" in notes_mod.facts_block() and "their notes" in notes_mod.facts_block())
+check("a note can be deleted", notes_mod.delete(_note["id"]) and notes_mod.load() == [])
+check("deleting a note that is not there says so", notes_mod.delete("nope") is False)
+open(notes_mod.NOTES_FILE, "w", encoding="utf-8").write("{broken")
+check("a corrupt notes file reads as empty", notes_mod.load() == [])
+
+
+section("Calendar - only what cannot be missed, and the student decides")
+
+cal_mod.OVERRIDES_FILE = os.path.join(tempfile.mkdtemp(), "calendar_overrides.json")
+_from, _to = datetime(2026, 9, 1).date(), datetime(2026, 9, 30).date()
+
+
+def _cal_mail(mid, category, events, body="", html_body=""):
+    return {"id": mid, "subject": "subject " + mid, "category": category,
+            "events": events, "body_text": body, "body_html": html_body,
+            "received_at": "2026-09-10T00:00:00+00:00", "courses": ["ECON F212"]}
+
+
+_quiz_ev = {"title": "FoFA Quiz 2", "date": "2026-09-16", "start_time": "18:15",
+            "kind": "exam", "details": "Chapters 3-5", "link": ""}
+_asg_ev = {"title": "Assignment 2 due", "date": "2026-09-25", "kind": "deadline",
+           "details": "Two-page report", "link": "https://classroom.google.com/c/abc"}
+_asg_again = {"title": "Reminder: Assignment 2 deadline", "date": "2026-09-25",
+              "kind": "deadline", "details": "", "link": ""}
+_hack_ev = {"title": "Hackathon registration closes", "date": "2026-09-20",
+            "kind": "deadline", "details": "", "link": ""}
+_talk_ev = {"title": "Guest talk", "date": "2026-09-18", "kind": "event",
+            "details": "", "link": ""}
+_cal_mails = [
+    _cal_mail("q", "Classes", [_quiz_ev]),
+    _cal_mail("a1", "Classes", [_asg_ev],
+              body="Instructions: https://classroom.google.com/c/abc"),
+    _cal_mail("a2", "Classes", [_asg_again]),
+    _cal_mail("h", "Fests", [_hack_ev]),
+    _cal_mail("t", "Other", [_talk_ev],
+              html_body='<a href="https://drive.google.com/file/d/x">slides</a>'
+                        '<a href="https://example.com/unsubscribe">unsubscribe</a>'),
+    _cal_mail("hidden", "Ignore", [dict(_quiz_ev, title="Spam quiz")]),
+]
+_on, _off = cal_mod.build(_cal_mails, _from, _to, hidden_ids={"hidden"})
+_on_titles = [e["title"] for e in _on]
+check("a quiz goes on the calendar by itself", "FoFA Quiz 2" in _on_titles)
+check("its portions come with it", _on[0]["details"] == "Chapters 3-5")
+check("an assignment deadline goes on by itself", any("Assignment 2" in t for t in _on_titles))
+check("three reminder mails about one assignment are one entry",
+      sum(1 for t in _on_titles if "Assignment 2" in t) == 1)
+_asg_entry = next(e for e in _on if "Assignment 2" in e["title"])
+check("that entry lists every mail it was mentioned in", len(_asg_entry["sources"]) == 2)
+check("where the instructions are is offered", _asg_entry["links"] == ["https://classroom.google.com/c/abc"])
+check("a fest registration deadline is offered, not imposed",
+      "Hackathon registration closes" in [e["title"] for e in _off])
+check("an ordinary event is offered, not imposed", "Guest talk" in [e["title"] for e in _off])
+_talk = next(e for e in _off if e["title"] == "Guest talk")
+check("a useful link from the mail is kept and a footer link is not",
+      _talk["links"] == ["https://drive.google.com/file/d/x"])
+check("filtered mail never feeds the calendar",
+      "Spam quiz" not in _on_titles + [e["title"] for e in _off])
+check("no timetabled classes are on the calendar",
+      all(e.get("source") == "mail" for e in _on))
+check("a link the mail does not contain is never offered",
+      cal_mod.links_for({"body_text": "no links here"},
+                        {"link": "https://invented.example.com/x"}) == [])
+
+cal_mod.set_on_calendar(_talk["keys"], True)
+cal_mod.set_on_calendar(next(e for e in _on if e["title"] == "FoFA Quiz 2")["keys"], False)
+_on2, _off2 = cal_mod.build(_cal_mails, _from, _to, hidden_ids={"hidden"})
+check("Add to cal puts an offered event on the calendar",
+      "Guest talk" in [e["title"] for e in _on2])
+check("Remove from cal takes even a quiz off",
+      "FoFA Quiz 2" not in [e["title"] for e in _on2]
+      and "FoFA Quiz 2" in [e["title"] for e in _off2])
+cal_mod.set_on_calendar(next(e for e in _off2 if e["title"] == "FoFA Quiz 2")["keys"], True)
+check("and it can be put back",
+      "FoFA Quiz 2" in [e["title"] for e in cal_mod.build(_cal_mails, _from, _to)[0]])
+open(cal_mod.OVERRIDES_FILE, "w", encoding="utf-8").write("[1, 2")
+check("a corrupt overrides file falls back to the automatic rules",
+      cal_mod.load_overrides() == {"added": [], "removed": []})
+
+check("the date extractor asks for portions and instructions",
+      "portions or syllabus" in ev.build_prompt({}, "", datetime(2026, 9, 1)))
+check("a paper handback is never extracted as an exam",
+      "never \"exam\"" in ev.build_prompt({}, "", datetime(2026, 9, 1)))
+_ev_ok = ev.validate_event({"title": "Quiz", "date": "2026-09-16", "kind": "exam",
+                            "details": "Ch 3-5", "link": "javascript:alert(1)"},
+                           datetime(2026, 9, 10, tzinfo=timezone.utc))
+check("a link that is not http(s) is dropped", _ev_ok["link"] == "" and _ev_ok["details"] == "Ch 3-5")
+
+
+section("Faster refresh - summaries run a few at a time")
+
+import time as _time
+
+_seen_threads = set()
+
+
+class _ThreadedModel:
+    def __init__(self):
+        self.messages = self
+
+    def create(self, model, max_tokens, messages, output_config=None, **extra):
+        import threading as _th
+        _seen_threads.add(_th.get_ident())
+        _time.sleep(0.05)
+        subject = messages[0]["content"].split("subject: ", 1)[1].split("\n", 1)[0]
+        return Reply(json.dumps({"summary": "About " + subject + "."}))
+
+
+_many = [{"id": "s%d" % i, "subject": "mail %d" % i, "from": "x",
+          "body_text": "hello %d" % i} for i in range(9)]
+_start = _time.time()
+_sums = m.summarize_emails(_ThreadedModel(), _many)
+check("every mail gets its own summary, none crossed over",
+      all(_sums["s%d" % i] == "About mail %d." % i for i in range(9)), _sums)
+check("summaries are requested in parallel", len(_seen_threads) > 1)
+check("the number of parallel requests is bounded", m.MODEL_WORKERS <= 8)
 
 
 section("Ask - a conversation, not a search box")

@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 
@@ -91,24 +92,35 @@ CLASSIFY_MODEL = os.environ.get("MAIL_FILTER_MODEL", "gemma3:4b")
 # answer at a time and is allowed to think, so it gets the biggest model that is
 # actually installed. CHAT_MODEL_PREFERENCE is tried in order.
 #
-# The big model is opt-in, never automatic: on 2026-09-13, loading the 15 GB
-# gemma4 mixture with a 16k context beside gemma3:4b filled the 20 GB card that
-# also drives the display, and the display driver started failing. Set
-# MAIL_FILTER_CHAT_MODEL to use a bigger model deliberately.
+# The biggest installed model answers chat questions: the student asked for the
+# best model available, accuracy over speed. On 2026-09-13 loading it beside
+# gemma3:4b filled the 20 GB card that drives the display and the monitor lost
+# signal. That cannot recur now: Ollama keeps one model loaded and 6 GB of VRAM
+# in reserve, and the VRAM guard below sends any load that cannot fit with that
+# reserve to the CPU. On this machine the 26B model therefore answers from
+# system RAM - slow, never a black screen. The digest stays on gemma3:4b.
 CHAT_MODEL_PREFERENCE = [
     os.environ.get("MAIL_FILTER_CHAT_MODEL", ""),
+    "gemma4:26b-a4b-it-qat",
+    "gemma3:12b",
     "gemma3:4b",
 ]
+# A chat answer from a big model on the CPU can take minutes.
+CHAT_TIMEOUT = 900
 # Set explicitly so a long prompt is never silently truncated from the front,
 # which would cut off the very rules that keep an answer honest. Kept modest:
 # the KV cache for this window lives in VRAM too.
 CLASSIFY_NUM_CTX = 8192
-CHAT_NUM_CTX = 8192
+CHAT_NUM_CTX = 12288  # room for attachment text; the VRAM guard still applies
 OLLAMA_TIMEOUT = 300  # seconds; a cold model load on a busy machine is slow
 # Long enough to cover the batches of one run, short enough that the model is
 # not sitting in VRAM all day. Deliberate - see unload() below.
 MODEL_KEEP_ALIVE = "5m"
 BATCH_SIZE = 15  # emails per classification call
+# Summaries and date extraction are one HTTP call per mail to the same local
+# model. Sent a few at a time, Ollama answers them in parallel when it has room,
+# which is most of what made a Refresh slow.
+MODEL_WORKERS = max(1, int(os.environ.get("MAIL_FILTER_WORKERS", "3")))
 FETCH_BATCH_SIZE = 25  # messages per Gmail batch HTTP request
 FETCH_BATCH_PAUSE_SECONDS = 2  # keeps a long backfill inside the quota
 
@@ -585,6 +597,86 @@ def extract_bodies(payload):
     return html_body, text_body
 
 
+def attachment_parts(payload):
+    """Every part offered as a download, with what is needed to fetch it."""
+    found = []
+    stack = [payload or {}]
+    seen = 0
+    while stack and seen < 200:
+        part = stack.pop(0)  # breadth-first keeps the mail's own order
+        seen += 1
+        filename = part.get("filename") or ""
+        body = part.get("body") or {}
+        if filename and (body.get("attachmentId") or body.get("data")):
+            found.append({
+                "filename": filename,
+                "mime": (part.get("mimeType") or "").lower(),
+                "size": int(body.get("size") or 0),
+                "attachment_id": body.get("attachmentId") or "",
+                "data": body.get("data") or "",
+            })
+        stack.extend(part.get("parts") or [])
+    return found
+
+
+def _b64url(raw):
+    raw = raw or ""
+    return base64.urlsafe_b64decode((raw + "=" * (-len(raw) % 4)).encode("ascii"))
+
+
+def fetch_attachments(service, message_id, parts, ids=()):
+    """Download, save and read one mail's attachments. Never raises.
+
+    Each file is written under attachments/<mail id>/ so the viewer and the
+    chat can hand it back, and read by attachments.extract, which also finds
+    every row containing the student's ID. A file that cannot be downloaded
+    or read is recorded with the reason rather than dropped silently.
+    """
+    import attachments as att
+
+    usable = [p for p in parts or []
+              if att.kind_for(p["filename"], p["mime"]) != "skip"]
+    results = []
+    for index, part in enumerate(usable[:att.MAX_ATTACHMENTS_PER_MAIL]):
+        entry = {"filename": part["filename"], "mime": part["mime"],
+                 "size": part["size"], "index": index, "text": "",
+                 "matches": [], "error": ""}
+        try:
+            if part["size"] > att.MAX_DOWNLOAD_BYTES:
+                entry["error"] = "too large to download"
+                results.append(entry)
+                continue
+            raw = part["data"]
+            if not raw and part["attachment_id"]:
+                response = _execute_with_backoff(
+                    service.users().messages().attachments().get(
+                        userId="me", messageId=message_id,
+                        id=part["attachment_id"]),
+                    f"an attachment of {message_id}")
+                raw = (response or {}).get("data") or ""
+            data = _b64url(raw)
+            path = att.storage_path(message_id, index, part["filename"])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            entry = att.extract(part["filename"], part["mime"], data, ids)
+            entry.update(index=index,
+                         path=os.path.relpath(path, SCRIPT_DIR).replace("\\", "/"))
+        except Exception as exc:  # noqa: BLE001 - one file must not sink the run
+            entry["error"] = "could not download it ({})".format(_describe(exc))
+        results.append(entry)
+    return results
+
+
+def my_ids():
+    """The strings that mean "this student" in a document, or ()."""
+    try:
+        import profile as profile_mod
+        return tuple(profile_mod.ids())
+    except Exception:  # noqa: BLE001 - no profile just means no ID matching
+        return ()
+
+
 def fetch_emails_since(service, since_dt, max_results):
     """(emails, complete). `complete` is False if anything was left behind.
 
@@ -635,6 +727,11 @@ def fetch_emails_since(service, since_dt, max_results):
                 "cc": decode_mime_header(headers.get("Cc")),
                 "reply_to": decode_mime_header(headers.get("Reply-To")),
                 "message_id_header": headers.get("Message-ID", ""),
+                # Downloaded and read now, while the message is in hand: a
+                # seating plan nobody opens is a seating plan nobody finds.
+                "attachments": fetch_attachments(
+                    service, message_id,
+                    attachment_parts(msg_data.get("payload")), my_ids()),
             }
         )
 
@@ -776,6 +873,90 @@ class OllamaError(RuntimeError):
     """Ollama was unreachable or returned something that wasn't a reply."""
 
 
+# ---------------------------------------------------------------------------
+# VRAM guard
+# ---------------------------------------------------------------------------
+# On 2026-09-13 a 15 GB model was loaded next to a second one on the 20 GB card
+# that also drives the display. VRAM ran out, the monitor lost signal, and
+# Windows disabled the card. So before any model is loaded, the free VRAM is
+# checked: the GPU stays the first choice, but a load that would leave less
+# than VRAM_RESERVE_GB for the desktop runs on the CPU instead. Slower, never
+# a black screen.
+VRAM_RESERVE_GB = float(os.environ.get("MAIL_FILTER_VRAM_RESERVE_GB", "6"))
+_VRAM_CACHE = {"at": 0.0, "status": None}
+
+
+def read_vram_status():
+    """(used_gb, total_gb) of dedicated GPU memory on Windows, or None."""
+    if os.name != "nt":
+        return None
+    now = time.time()
+    if _VRAM_CACHE["status"] is not None and now - _VRAM_CACHE["at"] < 30:
+        return _VRAM_CACHE["status"]
+    import subprocess
+    script = (
+        "$u=((Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Usage' -ErrorAction Stop)"
+        ".CounterSamples | Measure-Object CookedValue -Sum).Sum; $t=0; "
+        "Get-ChildItem 'HKLM:\\SYSTEM\\ControlSet001\\Control\\Class\\"
+        "{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | "
+        "ForEach-Object { $v=(Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue)."
+        "'HardwareInformation.qwMemorySize'; if ($v -and [double]$v -gt $t) { $t=[double]$v } }; "
+        "Write-Output ($u.ToString() + ' ' + $t.ToString())"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.split()
+        used, total = float(out[0]) / 1024 ** 3, float(out[1]) / 1024 ** 3
+        status = (used, total) if total > 0 else None
+    except Exception:  # noqa: BLE001 - unknown means "let Ollama decide"
+        status = None
+    _VRAM_CACHE.update(at=now, status=status)
+    return status
+
+
+def gpu_has_room(model_bytes, num_ctx, status, reserve_gb=None):
+    """Would loading this model still leave the desktop its reserve?
+
+    Unknown VRAM or unknown model size: yes (Ollama's own behaviour, GPU
+    first). The estimate is the file size plus ~15 % for runtime buffers plus
+    the KV cache, roughly 0.12 GB per thousand tokens of context for the small
+    models used here - deliberately generous.
+    """
+    reserve_gb = VRAM_RESERVE_GB if reserve_gb is None else reserve_gb
+    if not status or not model_bytes:
+        return True
+    used_gb, total_gb = status
+    need_gb = model_bytes / 1024 ** 3 * 1.15 + (num_ctx or 4096) / 1000 * 0.12
+    return used_gb + need_gb <= total_gb - reserve_gb
+
+
+def ollama_reserve_gb():
+    """VRAM Ollama itself keeps free (OLLAMA_GPU_OVERHEAD), in GB, or 0.
+
+    Read from this process's environment, then from the user's saved
+    environment on Windows, because the viewer may have been started before the
+    variable was set. When Ollama already holds back at least VRAM_RESERVE_GB,
+    its own fitter decides how many layers go on the GPU, and it is far more
+    accurate than gpu_has_room's estimate: on 2026-09-13 it put the whole 26B
+    model on the card (14.3 GB) and still left 6 GB free, where the estimate
+    said 18.7 GB and would have pushed it to the CPU.
+    """
+    raw = os.environ.get("OLLAMA_GPU_OVERHEAD", "")
+    if not raw and os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                raw = str(winreg.QueryValueEx(key, "OLLAMA_GPU_OVERHEAD")[0])
+        except OSError:
+            raw = ""
+    try:
+        return max(0.0, float(raw) / 1024 ** 3)
+    except ValueError:
+        return 0.0
+
+
 class OllamaClient:
     """The local model, shaped like the client the rest of this file expects.
 
@@ -806,6 +987,42 @@ class OllamaClient:
         except urllib.error.URLError as exc:
             raise OllamaError(f"could not reach Ollama at {self.host}: {exc.reason}") from exc
 
+    def _placement_options(self, model, num_ctx):
+        """{} to let Ollama use the GPU, {"num_gpu": 0} to keep this on CPU.
+
+        Decided once a minute per model, so consecutive calls do not flip a
+        loaded model between devices (each flip is a full reload).
+        """
+        cache = self.__dict__.setdefault("_placement", {})
+        key = (model, num_ctx)
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < 60:
+            return hit[1]
+
+        options = {}
+        try:
+            if ollama_reserve_gb() >= VRAM_RESERVE_GB:
+                # Ollama keeps the reserve itself and fits layers around it:
+                # GPU first, spilling to system RAM only if it has to.
+                cache[key] = (time.time(), options)
+                return options
+            loaded = (self._request("/api/ps", timeout=5) or {}).get("models") or []
+            on_gpu = any(m.get("name") in (model, model + ":latest")
+                         and (m.get("size_vram") or 0) > 0 for m in loaded)
+            if not on_gpu:
+                tags = (self._request("/api/tags", timeout=5) or {}).get("models") or []
+                size = next((m.get("size") or 0 for m in tags
+                             if m.get("name") in (model, model + ":latest")), 0)
+                if size and not gpu_has_room(size, num_ctx, read_vram_status()):
+                    options = {"num_gpu": 0}
+                    print(f"Note: not enough free VRAM for {model} while keeping "
+                          f"{VRAM_RESERVE_GB:.0f} GB for the display; running it on "
+                          "the CPU instead.", file=sys.stderr)
+        except Exception:  # noqa: BLE001 - the guard must never break a run
+            options = {}
+        cache[key] = (time.time(), options)
+        return options
+
     def create(self, model, max_tokens, messages, output_config=None,
                num_ctx=None, keep_alive=None):
         """One local generation. Mirrors the hosted client's call signature."""
@@ -815,6 +1032,9 @@ class OllamaClient:
             # prompt over that is truncated from the start - losing the rules
             # rather than the mail.
             options["num_ctx"] = num_ctx
+        # GPU first, CPU when the GPU cannot take it without starving the
+        # display. See the VRAM guard section above.
+        options.update(self._placement_options(model, num_ctx))
         payload = {
             "model": model,
             "messages": messages,
@@ -1322,18 +1542,41 @@ def summarize_emails(client, emails):
     falls back to the Gmail snippet so a row is never blank.
     """
     summaries = {}
-    for position, e in enumerate(emails, start=1):
-        if len(emails) > 1:
-            print(
-                f"  summarising {position}/{len(emails)}...",
-                end="\r",
-                file=sys.stderr,
-                flush=True,
-            )
-        summaries[e["id"]] = summarize_email(client, e)
-    if emails:
-        print(" " * 40, end="\r", file=sys.stderr)
+    if not emails:
+        return summaries
+    done = 0
+    with ThreadPoolExecutor(max_workers=MODEL_WORKERS) as pool:
+        futures = {pool.submit(summarize_email, client, e): e for e in emails}
+        for future in as_completed(futures):
+            e = futures[future]
+            try:
+                summaries[e["id"]] = future.result()
+            except Exception:  # noqa: BLE001 - summarize_email already swallows
+                summaries[e["id"]] = ""
+            done += 1
+            if len(emails) > 1:
+                print(f"  summarising {done}/{len(emails)}...",
+                      end="\r", file=sys.stderr, flush=True)
+    print(" " * 40, end="\r", file=sys.stderr)
     return summaries
+
+
+def with_attachment_text(email, limit=3000):
+    """The mail's text plus the start of each readable attachment.
+
+    Assignment briefs and quiz portions often live in the attached PDF, not
+    in the mail, so date extraction reads both.
+    """
+    body = readable_body(email)
+    extra, used = [], 0
+    for attachment in email.get("attachments") or []:
+        text = (attachment.get("text") or "").strip()
+        if not text or used >= limit:
+            continue
+        piece = text[:limit - used]
+        extra.append("[attached file: {}]\n{}".format(attachment.get("filename", ""), piece))
+        used += len(piece)
+    return body + ("\n\n" + "\n\n".join(extra) if extra else "")
 
 
 # Wording that makes a mail plausibly about coursework. Used only to check a
@@ -1567,6 +1810,7 @@ def save_store(emails, id_to_category, summaries):
             "absolute": bool(e.get("absolute")),
             "courses": e.get("courses") or [],
             "events": events,
+            "attachments": e.get("attachments") or prior.get("attachments") or [],
         }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=STORE_RETENTION_DAYS)
@@ -1679,6 +1923,16 @@ def main():
              "calendar.",
     )
     parser.add_argument(
+        "--attachments",
+        type=float,
+        nargs="?",
+        const=60,
+        default=None,
+        metavar="DAYS",
+        help="Download and read attachments for stored mail from the last DAYS "
+             "days (default 60) that has not been checked yet. Gmail only.",
+    )
+    parser.add_argument(
         "--recheck",
         action="store_true",
         help="Re-apply the course tagging and category rules to the mail "
@@ -1699,6 +1953,10 @@ def main():
     if args.recheck:
         # Deterministic only: no Gmail round-trip, no model call.
         return recheck_store()
+
+    if args.attachments is not None:
+        # Gmail only, no model: open the files stored mail arrived with.
+        return backfill_attachments(args.attachments)
 
     if args.max < 1:
         parser.error("--max must be at least 1")
@@ -1803,12 +2061,20 @@ def main():
             now = datetime.now().astimezone()
             needs_dates = [e for e in shown
                            if "events" not in (done.get(e["id"]) or {})]
-            for position, e in enumerate(needs_dates, start=1):
-                print(f"  reading dates {position}/{len(needs_dates)}...",
-                      end=chr(13), file=sys.stderr, flush=True)
-                e["events"] = events_mod.extract_events(
-                    client, e, readable_body(e), CLASSIFY_MODEL,
+            def _dates(e):
+                return events_mod.extract_events(
+                    client, e, with_attachment_text(e), CLASSIFY_MODEL,
                     e["received_at"], today=now, debug=DEBUG)
+
+            with ThreadPoolExecutor(max_workers=MODEL_WORKERS) as pool:
+                futures = {pool.submit(_dates, e): e for e in needs_dates}
+                for position, future in enumerate(as_completed(futures), start=1):
+                    print(f"  reading dates {position}/{len(needs_dates)}...",
+                          end=chr(13), file=sys.stderr, flush=True)
+                    try:
+                        futures[future]["events"] = future.result()
+                    except Exception:  # noqa: BLE001 - extract_events never raises
+                        futures[future]["events"] = []
             if needs_dates:
                 print(" " * 40, end=chr(13), file=sys.stderr)
     finally:
@@ -1833,6 +2099,69 @@ def main():
             "alone. The next run will re-read this window.",
             file=sys.stderr,
         )
+
+
+def backfill_attachments(limit_days=60):
+    """Fetch and read attachments for mail already in the store.
+
+    Mail stored before attachments were read has never had its files opened,
+    so last week's seating plan is in the inbox but invisible to the chat. This
+    goes back over stored mail from the last `limit_days` days not yet checked.
+    Gmail only - no model call.
+    """
+    limit_days = limit_days or 60
+    store = load_store()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=limit_days)
+    todo = []
+    for mail in store["mails"]:
+        if not isinstance(mail, dict) or "attachments" in mail:
+            continue
+        try:
+            when = datetime.fromisoformat(mail.get("received_at") or "")
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when >= cutoff:
+            todo.append(mail)
+
+    if not todo:
+        print("Every stored mail from the last {:g} days has already been "
+              "checked for attachments.".format(limit_days))
+        return 0
+
+    service = get_gmail_service()
+    ids = my_ids()
+    results, files = {}, 0
+    for position, mail in enumerate(todo, start=1):
+        print(f"  checking {position}/{len(todo)}...", end=chr(13),
+              file=sys.stderr, flush=True)
+        try:
+            message = _execute_with_backoff(
+                _metadata_request(service, mail["id"]), mail["id"])
+        except Exception as exc:  # noqa: BLE001 - one mail must not stop the rest
+            print(f"\nNote: could not re-read "
+                  f"'{_truncate(mail.get('subject', ''), 60)}' ({_describe(exc)}).",
+                  file=sys.stderr)
+            continue
+        got = fetch_attachments(service, mail["id"],
+                                attachment_parts(message.get("payload")), ids)
+        results[mail["id"]] = got
+        files += len(got)
+
+    fresh = load_store()
+    for mail in fresh["mails"]:
+        if isinstance(mail, dict) and mail.get("id") in results:
+            mail["attachments"] = results[mail["id"]]
+    _write_atomic(STORE_FILE, json.dumps(fresh, ensure_ascii=False))
+
+    matched = sum(len(a.get("matches") or [])
+                  for got in results.values() for a in got)
+    unreadable = sum(1 for got in results.values() for a in got if a.get("error"))
+    print(" " * 40, end=chr(13), file=sys.stderr)
+    print("Checked {} mail(s): {} attachment(s) stored, {} could not be read, "
+          "{} row(s) mention your ID.".format(len(results), files, unreadable, matched))
+    return 0
 
 
 def recheck_store():
