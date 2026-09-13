@@ -33,8 +33,10 @@ TODO_FILE = os.path.join(SCRIPT_DIR, "todos.json")
 
 MAX_TEXT = 300
 MAX_ACTIONS_PER_MAIL = 3
-# Mail tasks older than this (by due date) drop off unless you left them undone.
-STALE_DAYS = 14
+# A mail task this many days past its due date, never ticked off, drops off:
+# on the real inbox a 14-day window kept two-week-old registrations at the top.
+# Tasks you add yourself never drop off.
+STALE_DAYS = 3
 
 ACTION_VERBS = (r"fill(?:\s+(?:in|out|up))?|submit|upload|register|pay|complete|"
                 r"send|bring|attend|carry|download|sign(?:\s+up)?|apply|book|"
@@ -194,7 +196,10 @@ def mail_tasks(mails, today=None, hidden_ids=None):
     start = today - timedelta(days=60)
     end = today + timedelta(days=200)
     on, off = calendar_store.build(mails, start, end, hidden_ids=hidden_ids)
-    for entry in on + off:
+    # Only deadlines that are on the calendar: the calendar already decided
+    # what is must-not-miss (and the student's Add/Remove choices), so a
+    # hackathon registration or a placement opening does not become a chore.
+    for entry in on:
         if entry.get("kind") != "deadline":
             continue
         key = _key("deadline", entry["keys"][0] if entry.get("keys") else entry["title"])

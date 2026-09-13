@@ -662,6 +662,14 @@ tutorial").
   about what is still live; ticked-off tasks stay under Done.
 - Each item carries `overdue` / `due_today`.
 
+Tuned on the real store: the first version listed 15 open tasks, most of them
+placement openings, hackathon registrations and deadlines up to 13 days past.
+Mail tasks now come only from deadlines that are **on the calendar** (so the
+calendar's must-not-miss judgement and the student's Add/Remove choices decide
+what becomes a chore - and internship/placement mail, which the student asked to
+leave alone for now, no longer does), and a mail task more than **3 days** past
+due and never ticked off drops off (was 14). Own tasks never drop off.
+
 Viewer API: `GET /api/todos`; `POST /api/todos/add|update|delete|order`.
 
 UI (new **To-Do** tab): add box with optional date and time (Enter adds);
@@ -676,10 +684,57 @@ deadlines become tasks; junk mail sets none; own task added at top; empty
 refused; tick-off survives rebuild; removed mail task stays gone; drag order
 kept; rename; overdue flag; corrupt file.
 
+### 2026-09-13 — the user's three chat checks, after the thinking fix
+
+Asked through the real viewer, on the CPU (gemma4:26b-a4b-it-qat, ~2–2.5 min
+each, prompt ~7–8k tokens at ~62 tokens/s, generation ~8.6 tokens/s):
+1. *Next exam or quiz, with source subject and sender* - "Your next quiz is FOFA
+   Quiz-1 on 2026-09-16 at 18:15", citing "Regarding FOFA Quiz-1" from Utkarsh
+   Kumar. Correct, and not a paper-collection date.
+2. *Seating or room numbers in any mail or spreadsheet* - "I couldn't find any
+   information regarding your specific exam seating arrangements or assigned
+   room numbers". Correct: no attachment row contains the campus ID yet.
+3. *HSS teachers, HOD, Wednesday classes* - Ufaque Paiker (TWS) and Pranesh
+   Bhargava (Linguistics), correct; HOD "I don't have information" (people.py has
+   no guess for these courses - too few class-wide mails), honest; Wednesday
+   classes at 09:00, 10:00, 14:00, 16:00, 17:00 - correct times, courses not
+   named. Flaw: returned found=false while citing 6 mails, so the page styles it
+   as not found; worth tightening.
+
+### 2026-09-13 — Marks tracker and CGPA simulator
+
+`marks.py` (new, no model; `marks.json` gitignored):
+- Reads released marks from mail text only when the mail is about marks
+  (marks/score/grade/result/evaluation/CGPA wording) and only when the number is
+  clearly a score: with a maximum ("Quiz 1: 8/10", "8 out of 10") or right after
+  "marks"/"score" ("Midsem marks: 34"), or "you scored/secured/got X (out of Y)
+  in <component>". So "Assignment 2: 25 September" and "Total: 500 rupees" are
+  not marks; a score above its maximum is rejected; a missing maximum stays
+  unknown.
+- Reads marks from attached mark sheets: in the row that contains the student's
+  ID, any numeric column named like a component or "marks"/"score"; the maximum
+  comes from the column name ("Quiz 1 (10)", "Midsem [40]", "Max 20").
+- On the real store the tracker finds **no marks**, which is correct: the only
+  marks-related mails are "marks not showing up" complaints with no scores.
+- Components normalised (Midsem, Compre, Quiz N, Assignment N, Lab, EC N, …);
+  course from the sentence, the attachment filename, the subject, or the mail's
+  single course tag. One entry per course + component: newest mail wins; a mark
+  you enter wins over mail; removing a mail mark hides it for good.
+- Simulator on BITS grade points (A 10 … NC 0): per-course units (default 3)
+  and expected grade → unit-weighted semester GPA and new CGPA folded into your
+  CGPA and units so far; and the average grade points a target CGPA needs.
+
+Viewer: `GET /api/marks`; `POST /api/marks/add|remove|course|history`.
+UI: new **Marks** tab - CGPA-so-far card, live "if you get these grades" CGPA,
+"what a target needs" (with a rough letter grade, "not reachable" / "already
+safe"), a course table with marks so far, units and expected-grade dropdowns,
+an add-mark form, and a marks list with a progress bar, source chip that opens
+the mail (evidence shown on hover) and remove.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).
-- Marks/grade tracker and CGPA simulator (requested, not started).
+- Chat: answers that cite mail but report found=false are styled "not found".
 - Friends' one-click setup.exe with the timetable-screenshot import (requested,
   in progress: screenshot saved, box detection and reading still to build and
   test on the CPU).

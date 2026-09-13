@@ -18,6 +18,7 @@ profile.json
 user_notes.json
 calendar_overrides.json
 todos.json
+marks.json
 attachments/
 *.backup
 *.bak

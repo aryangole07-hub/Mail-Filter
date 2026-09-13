@@ -1893,6 +1893,84 @@ open(todo_mod.TODO_FILE, "w", encoding="utf-8").write("{oops")
 check("a corrupt to-do file reads as empty, not a crash",
       todo_mod.load() == {"items": [], "state": {}, "order": []})
 
+# Marks tracker and CGPA simulator (marks.py) - no model.
+import marks as marks_mod
+
+marks_mod.MARKS_FILE = os.path.join(tempfile.mkdtemp(), "marks.json")
+_mk_mail = {"id": "mk1", "subject": "FoFA Quiz 1 marks released", "courses": ["ECON F212"],
+            "received_at": "2026-09-10T00:00:00+00:00",
+            "body_text": "Dear students, the marks are out. Quiz 1: 8/10. "
+                         "You have scored 17.5 out of 20 in the assignment. "
+                         "Midsem marks: 34."}
+_found = marks_mod.marks_in_mail(_mk_mail)
+_by = {m["component"]: m for m in _found}
+check("a score with its maximum is read", _by.get("Quiz 1", {}).get("score") == 8
+      and _by["Quiz 1"]["max"] == 10 and _by["Quiz 1"]["pct"] == 80.0, _found)
+check("'you have scored X out of Y in the assignment' is read",
+      _by.get("Assignment", {}).get("score") == 17.5 and _by["Assignment"]["max"] == 20)
+check("a mark with no stated maximum keeps max unknown, never guessed",
+      _by.get("Midsem", {}).get("score") == 34 and _by["Midsem"]["max"] is None)
+check("the course comes from the mail", all(m["course"] == "ECON F212" for m in _found))
+check("a date after a component name is not a mark",
+      marks_mod.marks_in_mail({"id": "x", "subject": "Assignment 2 marks and results",
+                               "body_text": "Assignment 2: 25 September."}) == [])
+check("numbers are not read as marks in mail that is not about marks",
+      marks_mod.marks_in_mail({"id": "y", "subject": "Hostel", "body_text": "Quiz 1: 8/10"}) == [])
+check("a total with no maximum is not a mark",
+      marks_mod.marks_in_mail({"id": "z", "subject": "Fee result",
+                               "body_text": "Total: 500 rupees."}) == [])
+check("a score above its maximum is a misreading",
+      marks_mod.marks_in_mail({"id": "w", "subject": "marks",
+                               "body_text": "Midsem: 34/20."}) == [])
+_sheet_mail = {"id": "sheet", "subject": "MSN marks", "courses": ["ECON F213"],
+               "received_at": "2026-09-11T00:00:00+00:00", "body_text": "Please find attached.",
+               "attachments": [{"filename": "ECON F213 marks.xlsx", "matches": [
+                   {"sheet": "S1", "row": 42, "cells": {"ID No": "2025B3PS0420H", "Name": "Me",
+                                                         "Quiz 1 (10)": "7", "Midsem [40]": "31"}}]}]}
+_sheet = {m["component"]: m for m in marks_mod.marks_in_mail(_sheet_mail)}
+check("marks are read from your row of an attached sheet, max from the column name",
+      _sheet.get("Quiz 1", {}).get("max") == 10 and _sheet.get("Midsem", {}).get("score") == 31
+      and _sheet["Midsem"]["max"] == 40 and _sheet["Quiz 1"]["course"] == "ECON F213", _sheet)
+_newer = dict(_mk_mail, id="mk2", received_at="2026-09-12T00:00:00+00:00",
+              body_text="Revised marks: Quiz 1: 9/10.")
+_built = marks_mod.build([_mk_mail, _newer, _sheet_mail])
+_q1 = [m for m in _built["marks"] if m["course"] == "ECON F212" and m["component"] == "Quiz 1"]
+check("the same component in two mails is one mark, the newest", len(_q1) == 1 and _q1[0]["score"] == 9)
+_manual = marks_mod.add_mark("ECON F212", "quiz-1", "10", "10")
+_q1 = [m for m in marks_mod.build([_mk_mail, _newer])["marks"]
+       if m["course"] == "ECON F212" and m["component"] == "Quiz 1"]
+check("a mark you enter yourself wins over the mail", _q1 and _q1[0]["source"] == "you"
+      and _q1[0]["score"] == 10)
+check("a mark above its maximum is refused", marks_mod.add_mark("ECON F212", "Quiz 2", 11, 10) is None)
+check("a mark for an unknown course is refused", marks_mod.add_mark("XYZ F999", "Quiz", 5, 10) is None)
+_mid = next(m for m in marks_mod.build([_mk_mail])["marks"] if m["component"] == "Midsem")
+marks_mod.remove_mark(_mid["id"])
+check("hiding a mark read from mail keeps it hidden",
+      not any(m["component"] == "Midsem" for m in marks_mod.build([_mk_mail])["marks"]))
+check("course units must be sensible", not marks_mod.set_course("ECON F212", units=0)
+      and marks_mod.set_course("ECON F212", units=4))
+check("only real grades are accepted", not marks_mod.set_course("ECON F212", expected="A+")
+      and marks_mod.set_course("ECON F212", expected="A"))
+marks_mod.set_course("ECON F213", units=3, expected="B")
+_sim = marks_mod.simulate([{"units": 4, "expected": "A"}, {"units": 3, "expected": "B"},
+                           {"units": 3, "expected": ""}], cgpa_so_far=9.0, units_so_far=20)
+check("semester GPA is unit-weighted grade points", _sim["semester_gpa"] == round(64 / 7, 2))
+check("the new CGPA folds the semester into the CGPA so far",
+      _sim["new_cgpa"] == round((180 + 64) / 27, 2))
+_need = marks_mod.simulate([{"units": 4, "expected": ""}, {"units": 3, "expected": ""}],
+                           cgpa_so_far=8.0, units_so_far=20, target=8.5)
+check("the simulator says what average a target CGPA needs",
+      _need["average_points_needed"] == round((8.5 * 27 - 160) / 7, 2) == 9.93
+      and _need["target_reachable"] is True, _need)
+_too_far = marks_mod.simulate([{"units": 4, "expected": ""}, {"units": 3, "expected": ""}],
+                              cgpa_so_far=8.0, units_so_far=20, target=9.0)
+check("a target that would need more than a 10 average is unreachable",
+      _too_far["average_points_needed"] == round((9.0 * 27 - 160) / 7, 2)
+      and _too_far["target_reachable"] is False, _too_far)
+check("the page gets your CGPA so far back", marks_mod.set_history("8.7", "40")
+      and marks_mod.build([])["history"] == {"cgpa_so_far": 8.7, "units_so_far": 40.0})
+check("an impossible CGPA is refused", not marks_mod.set_history("11", "40"))
+
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
                   encoding="utf-8").read()

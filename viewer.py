@@ -583,6 +583,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             import user_notes
             return self._json(200, {"notes": user_notes.load()})
 
+        if path == "/api/marks":
+            import marks
+            return self._json(200, marks.build(load_store()["mails"],
+                                               hidden_ids=hidden_mail_ids()))
+
         if path == "/api/todos":
             import todo_store
             return self._json(200, todo_store.build(load_store()["mails"],
@@ -645,7 +650,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "/api/notes", "/api/notes/delete",
                         "/api/calendar/add", "/api/calendar/remove",
                         "/api/todos/add", "/api/todos/update",
-                        "/api/todos/delete", "/api/todos/order"):
+                        "/api/todos/delete", "/api/todos/order",
+                        "/api/marks/add", "/api/marks/remove",
+                        "/api/marks/course", "/api/marks/history"):
             return self._json(404, {"error": "not found"})
 
         try:
@@ -677,6 +684,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             import user_notes
             ok = user_notes.delete(str(payload.get("id") or ""))
             return self._json(200 if ok else 404, {"ok": ok})
+
+        if path.startswith("/api/marks/"):
+            import marks
+            action = path[len("/api/marks/"):]
+            if action == "add":
+                entry = marks.add_mark(str(payload.get("course") or ""),
+                                       str(payload.get("component") or ""),
+                                       payload.get("score"), payload.get("max"))
+                if not entry:
+                    return self._json(400, {"error": "that mark does not make sense"})
+                return self._json(200, {"ok": True, "mark": entry})
+            if action == "remove":
+                ok = marks.remove_mark(str(payload.get("id") or ""))
+                return self._json(200 if ok else 404, {"ok": ok})
+            if action == "course":
+                ok = marks.set_course(str(payload.get("code") or ""),
+                                      units=payload.get("units"),
+                                      expected=payload.get("expected"))
+                return self._json(200 if ok else 400, {"ok": ok})
+            ok = marks.set_history(payload.get("cgpa_so_far"), payload.get("units_so_far"))
+            return self._json(200 if ok else 400, {"ok": ok})
 
         if path.startswith("/api/todos/"):
             import todo_store

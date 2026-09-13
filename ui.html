@@ -222,6 +222,31 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 .notebody{white-space:pre-wrap;font-size:14px;line-height:1.55;}
 .notemeta{display:flex;justify-content:space-between;align-items:center;font-size:12px;
   color:var(--muted);margin-top:6px;}
+/* marks */
+.markgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:14px;}
+.markcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 15px;}
+.markcard h3{margin:0 0 8px;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
+.markcard input,.markcard select{background:var(--bg);border:1px solid var(--line);color:var(--ink);
+  border-radius:9px;padding:7px 9px;font:inherit;font-size:13.5px;min-width:0;}
+.bigstat{font-size:30px;font-weight:750;line-height:1.1;}
+.bigstat small{font-size:13px;font-weight:500;color:var(--muted);margin-left:6px;}
+.coursetable{width:100%;border-collapse:collapse;font-size:13.5px;}
+.coursetable th{text-align:left;font-size:11.5px;color:var(--muted);font-weight:650;padding:6px 6px;border-bottom:1px solid var(--line);}
+.coursetable td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:middle;}
+.coursetable input{width:58px;} .coursetable select{width:70px;}
+.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px 10px;margin-bottom:14px;}
+.markrow{display:flex;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--line);
+  border-radius:11px;padding:9px 12px;margin-bottom:7px;flex-wrap:wrap;}
+.markrow .mcomp{font-weight:650;min-width:110px;}
+.markrow .mscore{font-variant-numeric:tabular-nums;font-weight:650;min-width:70px;}
+.markrow .mbar{flex:1 1 120px;height:7px;border-radius:99px;background:var(--line);overflow:hidden;min-width:80px;}
+.markrow .mbar i{display:block;height:100%;background:var(--accent);}
+.markrow .msrc{font-size:12px;color:var(--muted);}
+.markrow .tdel{background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;}
+.markrow .tdel:hover{color:var(--danger);}
+.markadd{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px;}
+.markadd input,.markadd select{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  border-radius:10px;padding:9px 11px;font:inherit;font-size:13.5px;}
 /* to-do */
 .todoadd{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
 .todoadd input{background:var(--panel);border:1px solid var(--line);color:var(--ink);
@@ -325,6 +350,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     <button data-v="mail" aria-selected="true">Mail</button>
     <button data-v="calendar" aria-selected="false">Calendar</button>
     <button data-v="todo" aria-selected="false">To-Do</button>
+    <button data-v="marks" aria-selected="false">Marks</button>
     <button data-v="ask" aria-selected="false">Ask</button>
     <button data-v="notes" aria-selected="false">Notes</button>
   </nav>
@@ -376,6 +402,48 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     </div>
     <div class="daydetail" id="daydetail"></div>
     <div class="suggest" id="suggest"></div>
+  </section>
+
+  <!-- MARKS -->
+  <section id="v-marks" class="hidden">
+    <div class="markgrid">
+      <div class="markcard">
+        <h3>Your CGPA so far</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="cgpaSoFar" type="number" step="0.01" min="0" max="10" placeholder="CGPA" style="width:90px">
+          <input id="unitsSoFar" type="number" step="1" min="0" placeholder="Units done" style="width:110px">
+          <button class="btn small" id="historySave">Save</button>
+        </div>
+        <p class="hint" style="margin:8px 0 0">From your grade sheet. Leave empty if this is your first semester.</p>
+      </div>
+      <div class="markcard">
+        <h3>If you get the grades below</h3>
+        <div class="bigstat" id="simCgpa">–<small>CGPA</small></div>
+        <div class="hint" id="simSem" style="margin-top:4px">Pick an expected grade for each course.</div>
+      </div>
+      <div class="markcard">
+        <h3>What a target needs</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="targetCgpa" type="number" step="0.01" min="0" max="10" placeholder="Target CGPA" style="width:120px">
+        </div>
+        <div class="hint" id="targetOut" style="margin-top:8px">Enter a target to see the average grade you need this semester.</div>
+      </div>
+    </div>
+    <div class="tablewrap">
+      <table class="coursetable">
+        <thead><tr><th>Course</th><th>Marks so far</th><th>Units</th><th>Expected grade</th></tr></thead>
+        <tbody id="courseRows"></tbody>
+      </table>
+    </div>
+    <div class="sectitle">Marks from your mail and attachments</div>
+    <div class="markadd">
+      <select id="markCourse"></select>
+      <input id="markComp" placeholder="Component, e.g. Quiz 2" style="flex:1 1 160px">
+      <input id="markScore" type="number" step="0.5" min="0" placeholder="Score" style="width:90px">
+      <input id="markMax" type="number" step="0.5" min="0" placeholder="Out of" style="width:90px">
+      <button class="btn primary" id="markAddBtn">Add mark</button>
+    </div>
+    <div id="markList"></div>
   </section>
 
   <!-- TO-DO -->
@@ -838,6 +906,96 @@ async function addNote(){
   $("#noteadd").disabled=false;
 }
 
+/* ---- marks and the CGPA simulator ---- */
+let MARKS=null;
+const GRADES=["A","A-","B","B-","C","C-","D","E","NC"];
+async function loadMarks(){
+  try{ MARKS=await (await fetch("/api/marks")).json(); }catch(err){ MARKS=null; }
+  renderMarks();
+}
+function fmtNum(n){ return n==null?"":(Math.round(n*100)/100).toString(); }
+function renderMarks(){
+  if(!MARKS){ $("#markList").innerHTML=`<p class="hint">Could not load marks.</p>`; return; }
+  const h=MARKS.history||{};
+  if(document.activeElement!==$("#cgpaSoFar")) $("#cgpaSoFar").value=h.cgpa_so_far??"";
+  if(document.activeElement!==$("#unitsSoFar")) $("#unitsSoFar").value=h.units_so_far??"";
+  $("#courseRows").innerHTML=MARKS.courses.map(c=>`<tr data-code="${esc(c.code)}">
+      <td><b>${esc(c.label)}</b> <span class="hint">${esc(c.code)}</span></td>
+      <td>${c.out_of?`${fmtNum(c.scored)} / ${fmtNum(c.out_of)} <span class="hint">(${Math.round(100*c.scored/c.out_of)}%)</span>`:c.marks?`${c.marks} mark${c.marks>1?"s":""}`:`<span class="hint">none yet</span>`}</td>
+      <td><input type="number" min="1" max="20" step="1" value="${fmtNum(c.units)}" data-f="units"></td>
+      <td><select data-f="expected"><option value="">–</option>${GRADES.map(g=>`<option${c.expected===g?" selected":""}>${g}</option>`).join("")}</select></td>
+    </tr>`).join("");
+  $("#courseRows").querySelectorAll("tr").forEach(tr=>{
+    tr.querySelectorAll("[data-f]").forEach(inp=>{
+      inp.onchange=async()=>{
+        const body={code:tr.dataset.code}; body[inp.dataset.f]=inp.value;
+        try{ const r=await fetch("/api/marks/course",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+          if(!r.ok) throw new Error("check the value"); loadMarks(); }
+        catch(err){ showToast("Could not save: "+err.message,false); loadMarks(); }
+      };
+    });
+  });
+  const sim=MARKS.simulator||{};
+  $("#simCgpa").innerHTML=`${sim.new_cgpa!=null?fmtNum(sim.new_cgpa):"–"}<small>${h.units_so_far?"CGPA":"GPA"}</small>`;
+  $("#simSem").textContent=sim.graded_courses
+    ? `Semester GPA ${fmtNum(sim.semester_gpa)} over ${sim.graded_courses} course${sim.graded_courses>1?"s":""} (${fmtNum(sim.semester_units)} units).`
+    : "Pick an expected grade for each course.";
+  renderTarget();
+  $("#markCourse").innerHTML=MARKS.courses.map(c=>`<option value="${esc(c.code)}">${esc(c.label)}</option>`).join("");
+  $("#markList").innerHTML=MARKS.marks.length ? MARKS.marks.map(m=>{
+    const label=(MARKS.courses.find(c=>c.code===m.course)||{}).label||"Unknown course";
+    const pct=m.pct!=null?m.pct:null;
+    const src=m.source==="you"?"entered by you"
+      :`<span class="srcchip" data-open="${esc(m.mail_id||"")}" title="${esc(m.evidence||"")}">${m.source==="attachment"?"from a mark sheet":"from mail"} · ${esc((m.subject||"").slice(0,40))}</span>`;
+    return `<div class="markrow" data-id="${esc(m.id)}">
+      <span class="mcomp">${esc(label)} · ${esc(m.component)}</span>
+      <span class="mscore">${fmtNum(m.score)}${m.max!=null?" / "+fmtNum(m.max):""}</span>
+      <span class="mbar" title="${pct!=null?pct+"%":"maximum not stated"}"><i style="width:${pct!=null?pct:0}%"></i></span>
+      <span class="msrc">${src}</span>
+      <button class="tdel" title="Remove">✕</button>
+    </div>`;
+  }).join("") : `<p class="hint">No marks found in your mail yet. Add one above, or they will appear here when marks are mailed to you.</p>`;
+  $("#markList").querySelectorAll(".markrow").forEach(row=>{
+    row.querySelector(".tdel").onclick=async()=>{
+      try{ await fetch("/api/marks/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:row.dataset.id})}); loadMarks(); }
+      catch(err){ showToast("Could not remove: "+err.message,false); }
+    };
+    const chip=row.querySelector("[data-open]");
+    if(chip) chip.onclick=()=>{ const m=MAILS.find(x=>x.id===chip.dataset.open); if(m) openOriginal(m); };
+  });
+}
+function renderTarget(){
+  const out=$("#targetOut"), target=parseFloat($("#targetCgpa").value);
+  if(!MARKS||isNaN(target)){ out.textContent="Enter a target to see the average grade you need this semester."; return; }
+  const h=MARKS.history||{}, prior=h.units_so_far||0, cg=h.cgpa_so_far||0;
+  const units=MARKS.courses.reduce((s,c)=>s+(c.units||0),0);
+  if(!units){ out.textContent="Set the units for your courses first."; return; }
+  const need=(target*(prior+units)-cg*prior)/units;
+  const grade=GRADES.find(g=>({"A":10,"A-":9,"B":8,"B-":7,"C":6,"C-":5,"D":4,"E":2,"NC":0})[g]<=Math.ceil(need*100)/100+1e-9);
+  if(need>10) out.innerHTML=`Not reachable this semester: it would need an average of <b>${fmtNum(need)}</b> grade points.`;
+  else if(need<=0) out.innerHTML=`Already safe: even the lowest grades keep you at <b>${fmtNum(target)}</b> or above.`;
+  else out.innerHTML=`You need an average of <b>${fmtNum(need)}</b> grade points - roughly <b>${need>9?"A":need>8?"A-":need>7?"B":need>6?"B-":need>5?"C":need>4?"C-":"D"}</b> or better across ${fmtNum(units)} units.`;
+}
+async function saveHistory(){
+  try{
+    const r=await fetch("/api/marks/history",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({cgpa_so_far:$("#cgpaSoFar").value,units_so_far:$("#unitsSoFar").value})});
+    if(!r.ok) throw new Error("CGPA must be between 0 and 10");
+    showToast("Saved.",false); loadMarks();
+  }catch(err){ showToast("Could not save: "+err.message,false); }
+}
+async function addMark(){
+  const body={course:$("#markCourse").value,component:$("#markComp").value.trim(),
+              score:$("#markScore").value,max:$("#markMax").value};
+  if(!body.component||body.score===""){ showToast("Give the component and the score.",false); return; }
+  try{
+    const r=await fetch("/api/marks/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok) throw new Error("the score cannot be more than the maximum");
+    $("#markComp").value=""; $("#markScore").value=""; $("#markMax").value="";
+    loadMarks();
+  }catch(err){ showToast("Could not add: "+err.message,false); }
+}
+
 /* ---- to-do: your tasks plus the ones your mail sets you ---- */
 let TODOS={open:[],done:[]};
 async function loadTodos(){
@@ -1031,6 +1189,8 @@ $$("nav.views button").forEach(b=>{
     $("#v-ask").classList.toggle("hidden",VIEW!=="ask");
     $("#v-notes").classList.toggle("hidden",VIEW!=="notes");
     $("#v-todo").classList.toggle("hidden",VIEW!=="todo");
+    $("#v-marks").classList.toggle("hidden",VIEW!=="marks");
+    if(VIEW==="marks"){ loadMarks(); }
     if(VIEW==="todo"){ loadTodos(); }
     if(VIEW==="notes"){ loadNotes(); }
     if(VIEW==="calendar"){ loadCalendar(); }
@@ -1068,6 +1228,9 @@ $("#noteadd").onclick=addNote;
 $("#todoaddbtn").onclick=addTodo;
 $("#todotext").addEventListener("keydown",e=>{ if(e.key==="Enter") addTodo(); });
 $("#todoshowdone").onchange=renderTodos;
+$("#historySave").onclick=saveHistory;
+$("#targetCgpa").addEventListener("input",renderTarget);
+$("#markAddBtn").onclick=addMark;
 $("#qq").addEventListener("keydown",e=>{ if(e.key==="Enter") doAsk(); });
 renderChat();
 $("#prev").onclick=()=>{ CALMONTH.setMonth(CALMONTH.getMonth()-1); loadCalendar(); };
