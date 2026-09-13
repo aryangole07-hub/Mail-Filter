@@ -731,10 +731,46 @@ safe"), a course table with marks so far, units and expected-grade dropdowns,
 an add-mark form, and a marks list with a progress bar, source chip that opens
 the mail (evidence shown on hover) and remove.
 
+### 2026-09-13 — Timetable screenshot import (for the friends' setup)
+
+The student sent the ERP weekly "Schedule" screenshot (every Display Option
+ticked). It matches `courses.WEEKLY` exactly - all 27 slots - so it is the ground
+truth for measuring the importer. (An earlier probe of this on the GPU crashed the
+PC; everything here ran on the CPU.)
+
+`timetable_import.py` (new):
+- **Finding boxes.** A first probe found 2 "boxes" instead of 27: side-by-side
+  classes in the ERP grid are divided only by a one-pixel very light line
+  (≈ RGB 223,239,203) against box fill ≈ 183,209,146, and the first colour test
+  counted the line as box colour, merging whole rows. `_fill()` excludes pixels
+  that light; columns are found by how much box colour each x holds; rows inside
+  a column by the share of the column's width that is box colour (text only
+  covers part of a row).
+- **Weekdays.** The grey grid lines are covered wherever classes sit side by side,
+  so `column_edges()` alone found only Time/Saturday/Sunday lines. `_boundaries()`
+  adds the gaps between boxes; with all 8 columns (Time + 7 days) measured, each
+  box goes to the column holding its centre. If they cannot be measured, boxes are
+  taken left to right as Monday onwards and a warning says so.
+- **Real screenshot, no model:** 27/27 boxes; Mon 5, Tue 6, Wed 5, Thu 5, Fri 6 -
+  every day count correct.
+- **Reading.** Each box is cropped, doubled in size and transcribed by gemma3:4b
+  through `OllamaClient` (CPU only, ~40 s a box). The CPU probe showed verbatim
+  transcriptions. `parse_cell()` then extracts code, section, type, 12→24-hour
+  times, room ("F Block F207"), instructors (split, trailing "." removed,
+  title-cased) and course name, and lists missing fields; `import_screenshot()`
+  turns those into warnings naming day, time and course, and flags two classes
+  read at the same time.
+- `build_timetable()` → `timetable.json` shape: courses (known codes keep their
+  short forms and names; unknown ones get an acronym), weekly slots, per-slot
+  instructors. `python timetable_import.py <image> [--save]` runs it by hand.
+- Not yet: `courses.py` loading `timetable.json`, and the setup wizard using it.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).
 - Chat: answers that cite mail but report found=false are styled "not found".
+- Friends' setup: courses.py loads timetable.json; wizard with details +
+  timetable picture + continue-regardless warning; macOS support (requested).
 - Friends' one-click setup.exe with the timetable-screenshot import (requested,
   in progress: screenshot saved, box detection and reading still to build and
   test on the CPU).

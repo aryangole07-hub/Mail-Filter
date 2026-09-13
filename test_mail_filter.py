@@ -1971,6 +1971,112 @@ check("the page gets your CGPA so far back", marks_mod.set_history("8.7", "40")
       and marks_mod.build([])["history"] == {"cgpa_so_far": 8.7, "units_so_far": 40.0})
 check("an impossible CGPA is refused", not marks_mod.set_history("11", "40"))
 
+# Timetable screenshot import (timetable_import.py) - parsing and detection,
+# no model: the reader is replaced by the real text of each box.
+import timetable_import as tti
+
+_cell, _miss = tti.parse_cell(
+    "ECON F212 - L1\nFUNDA OF FIN\nAND ACCOUNT\nLecture\n9:00AM - 9:50AM\n"
+    "F BLOCK F207\nInstructors:\nUTKARSH\nKUMAR .,\nSHOBHANA\nSIKHAWAL .")
+check("a timetable box is read into a slot",
+      (_cell["code"], _cell["section"], _cell["type"], _cell["start"], _cell["end"], _cell["room"])
+      == ("ECON F212", "L1", "Lecture", "09:00", "09:50", "F Block F207"), _cell)
+check("the course name is read from between the code and the class type",
+      _cell["name"] == "Funda of Fin and Account", _cell["name"])
+check("instructors are split, tidied and title-cased",
+      _cell["instructors"] == ["Utkarsh Kumar", "Shobhana Sikhawal"], _cell["instructors"])
+check("a complete box has nothing missing", _miss == [], _miss)
+_pm, _ = tti.parse_cell("ECON F211 - L3\nPRINCIPLES OF ECONOMICS\nLecture\n3:00PM - 3:50PM\n"
+                        "F BLOCK F104\nInstructors:\nMINI THOMAS P,\nRISHI KUMAR .")
+check("afternoon times are converted to 24-hour", (_pm["start"], _pm["end"]) == ("15:00", "15:50"))
+check("a trailing initial stays part of the name", _pm["instructors"] == ["Mini Thomas P", "Rishi Kumar"])
+_tut, _ = tti.parse_cell("MATH F201 - T1\nDIFFERENTIAL\nEQUATIONS\nTutorial\n5:00PM - 5:50PM\n"
+                         "G BLOCK G107\nInstructors:\nGUJJI MURALI\nMOHAN REDDY")
+check("a tutorial is recognised", _tut["type"] == "Tutorial" and _tut["section"] == "T1")
+_bad, _bad_missing = tti.parse_cell("ECON F213 - L1\nMATHEMATIC & STAT METHOD\nLecture\n11:00AM")
+check("missing details are listed so setup can warn",
+      _bad_missing == ["end", "room", "instructors"], _bad_missing)
+
+from PIL import Image as _Image, ImageDraw as _Draw
+
+# A small synthetic ERP grid: a Time column and seven day columns with grey
+# lines, and green boxes on Tuesday and Friday.
+_img = _Image.new("RGB", (880, 400), "white")
+_draw = _Draw.Draw(_img)
+for _x in [0, 80] + [80 + 114 * _n for _n in range(1, 8)]:
+    _draw.line([(_x, 0), (_x, 399)], fill=(221, 221, 221), width=1)
+_tue = (80 + 114 + 2, 40, 80 + 228 - 2, 160)
+_fri = (80 + 114 * 4 + 2, 200, 80 + 114 * 5 - 2, 330)
+for _b in (_tue, _fri):
+    _draw.rectangle(_b, fill=(198, 224, 160))
+_found_boxes = tti.find_boxes(_img)
+check("coloured class boxes are found", len(_found_boxes) == 2, _found_boxes)
+_placed, _reliable = tti.assign_days(_found_boxes, tti.column_edges(_img), _img.size[0])
+check("each box gets its weekday from the grid lines",
+      _reliable and sorted(d for d, _ in _placed) == [1, 4], (_reliable, _placed))
+
+# The real ERP layout, measured on a real screenshot: side-by-side boxes cover
+# the grey grid line and are divided only by a one-pixel very light line, and
+# stacked boxes likewise. The first detector merged a whole row into one box.
+_real = _Image.new("RGB", (928, 500), "white")
+_rd = _Draw.Draw(_real)
+_colx = [85, 207, 335, 458, 586, 714, 823]
+for _x in [3] + _colx:
+    _rd.line([(_x, 0), (_x, 499)], fill=(221, 221, 221), width=1)
+_row_boxes = []
+for _left, _right in zip(_colx[:5], _colx[1:6]):          # Monday..Friday at 10:00
+    _row_boxes.append((_left + 1, 60, _right - 1, 220))
+for _b in _row_boxes:
+    _rd.rectangle(_b, fill=(183, 209, 146))
+for _left in _colx[1:5]:                                  # light separators between them
+    _rd.line([(_left, 60), (_left, 220)], fill=(223, 239, 203), width=1)
+_rd.rectangle((_colx[1] + 1, 222, _colx[2] - 1, 380), fill=(183, 209, 146))  # Tuesday 11:00
+_rd.line([(_colx[1], 221), (_colx[2], 221)], fill=(223, 239, 203), width=1)
+for _y in range(80, 200, 18):                             # dark text inside each box
+    _rd.line([(100, _y), (190, _y)], fill=(40, 40, 40), width=3)
+_real_boxes = tti.find_boxes(_real)
+check("side-by-side boxes divided only by a light line are separate boxes",
+      len(_real_boxes) == 6, _real_boxes)
+_real_days, _real_ok = tti.assign_days(_real_boxes, tti.column_edges(_real), 928)
+check("boxes covering the grid lines still get the right weekdays",
+      _real_ok and sorted(d for d, _ in _real_days) == [0, 1, 1, 2, 3, 4], (_real_ok, _real_days))
+
+_texts = {
+    1: "BITS F225 - L1\nENVIRONMENTAL STUDIES\nLecture\n8:00AM - 8:50AM\nF BLOCK F105\n"
+       "Instructors:\nSHUVADEEP MAITY .",
+    4: "HSS F352 - L1\nTECHNOLOGY WORK AND SOCIETY\nLecture\n2:00PM - 2:50PM\n"
+       "Instructors:\nUFAQUE PAIKER .",
+}
+_path = os.path.join(tempfile.mkdtemp(), "tt.png")
+_img.save(_path)
+_order = iter(sorted(_found_boxes, key=lambda b: b[0]))
+_by_box = {}
+for _d, _b in _placed:
+    _by_box[_b] = _texts[_d]
+_result = tti.import_screenshot(_path, read=lambda crop: _by_box.pop(
+    min(_by_box, key=lambda b: b[0])))
+_days = sorted(s["day"] for s in _result["slots"])
+check("a screenshot import reads every box with its day", _days == [1, 4], _result)
+check("a box with a missing room is warned about, naming the day, time and course",
+      any("Friday 14:00 (HSS F352): could not read the room" in w for w in _result["warnings"]),
+      _result["warnings"])
+_tt = tti.build_timetable(_result["slots"], known=co.BY_CODE)
+check("the imported timetable lists the courses",
+      [c["code"] for c in _tt["courses"]] == ["BITS F225", "HSS F352"])
+check("a known course keeps its short form", next(
+    c for c in _tt["courses"] if c["code"] == "HSS F352")["short"] == co.BY_CODE["HSS F352"]["short"])
+check("the weekly timetable has day, time, room and section",
+      _tt["weekly"][0] == {"day": 1, "start": "08:00", "end": "08:50", "code": "BITS F225",
+                           "type": "Lecture", "section": "L1", "room": "F Block F105"}, _tt["weekly"])
+check("instructors are kept per course and class type",
+      {"code": "BITS F225", "type": "Lecture", "profs": ["Shuvadeep Maity"]} in _tt["slot_profs"])
+check("an unknown course gets an acronym for a short form",
+      tti.acronym("Principles of Economics") == "PE")
+check("a picture with no class boxes says what to do",
+      "No class boxes" in tti.import_screenshot(
+          (lambda p: (_Image.new("RGB", (300, 200), "white").save(p), p)[1])(
+              os.path.join(tempfile.mkdtemp(), "blank.png")), read=lambda c: "")["warnings"][0])
+
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
                   encoding="utf-8").read()
