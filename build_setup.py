@@ -137,8 +137,12 @@ def build_mac_zip(creds, target=None):
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, data)
         guide = os.path.join(HERE, "SETUP-FOR-FRIENDS.md")
+        info = zipfile.ZipInfo(folder + "HOW TO INSTALL.txt")
+        info.create_system = 3
+        info.external_attr = (0o644 | 0o100000) << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
         with open(guide, "rb") as fh:
-            archive.writestr(folder + "HOW TO INSTALL.txt", fh.read())
+            archive.writestr(info, fh.read())
     print("Built: {}  ({:.1f} MB)".format(target, os.path.getsize(target) / (1024 * 1024)))
     return target
 

@@ -48,12 +48,17 @@ It takes **about 20–30 minutes**, almost all of it waiting for downloads.
 
 1. Get **`MailFilter-mac.zip`** from the person who shared Mail Filter with you,
    and **double-click it** to unzip. A folder **Mail Filter Setup** appears.
-2. Open that folder, **right-click `Install Mail Filter`** → **Open** → **Open**.
-   - (Right-click the first time, because the Mac blocks apps from unknown
-     developers on a normal double-click.)
+2. Open that folder and **double-click `Install Mail Filter`**.
+   - The Mac will probably say it **cannot be verified** (it blocks apps that
+     are not from the App Store). Click **Done** (or **OK**), then:
+   - Open **System Settings** → **Privacy & Security**, scroll down, and click
+     **Open Anyway** next to "Install Mail Filter". Enter your Mac password,
+     then click **Open Anyway** once more.
+   - On older macOS you can instead **right-click `Install Mail Filter`** →
+     **Open** → **Open**.
 3. **If Python is not installed**, a Python installer opens: click **Continue**,
    **Agree**, **Install** (enter your Mac password), and when it finishes,
-   right-click **Install Mail Filter** → **Open** again.
+   double-click **Install Mail Filter** again.
 4. Follow the window — the same as Windows:
    - **Start** → **name** and **BITS ID** → **Continue**.
    - **Choose picture…** → your timetable screenshot → **Continue**.

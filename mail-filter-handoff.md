@@ -942,3 +942,28 @@ make it compatable with that also".
 - OCR for scanned PDFs, if wanted.
 - Chat: answers that cite mail but report found=false are styled "not found".
 - Old events lack `details`/`link` (re-extraction not done).
+
+---
+
+## 2026-09-13 — Built the setup files to send to friends
+
+Prompt: "build the setup files so i can send them. also show me what to send to
+the mac user so she can set everything up".
+
+- **Built** with `build_setup.py`:
+  - `dist/setup.exe` (≈11.4 MB, Windows).
+  - `dist/MailFilter-mac.zip` (≈0.2 MB).
+  - Both embed `credentials.json`; `dist/` is gitignored.
+- **Copied** to `Downloads\Mail Filter - send to friends\` together with
+  `SETUP-FOR-FRIENDS.md`.
+- **Zip checked:** a "Mail Filter Setup" folder with every app file,
+  `credentials.json` and `HOW TO INSTALL.txt`. Scripts are 755, other files 644.
+- **Mac instructions updated for macOS Sequoia.** Right-click → Open no longer
+  bypasses Gatekeeper there. The guide now says: double-click → Done → System
+  Settings → Privacy & Security → **Open Anyway**. Right-click → Open is kept
+  for older macOS.
+- **Build fix:** the guide inside the zip was stored as 600; it is now 644.
+- **Reminder for sharing:** if the Google Cloud OAuth app is still in
+  *Testing*, each friend's email must be added under OAuth consent screen →
+  Test users, or their sign-in is refused. BITS Google Workspace admins may
+  also block unverified third-party apps; that is outside the app's control.
