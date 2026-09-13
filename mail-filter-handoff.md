@@ -985,3 +985,7 @@ Prompt: add a friend's BITS email to the Google OAuth test users.
   1/100. No test users are needed - any Google account can sign in after the
   "Google hasn't verified this app" → Advanced → Go to Mail Filter screen,
   up to 100 users over the project's lifetime (each friend uses one slot).
+
+- Showed the user where the Mac zip is:
+  `Downloads\Mail Filter - send to friends\MailFilter-mac.zip`
+  (a copy of `dist\MailFilter-mac.zip`).
