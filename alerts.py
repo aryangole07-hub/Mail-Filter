@@ -113,6 +113,14 @@ def compose(target, from_mail, from_timetable, today=None):
         where = " · " + event["location"] if event.get("location") else ""
         lines.append("{}  {}{}".format(when, event["title"], where))
 
+    # A makeup class or quiz on top of another course's lecture is the thing
+    # most worth knowing the evening before, so it goes first.
+    import conflicts
+    for event in conflicts.annotate([dict(e) for e in from_mail]):
+        warning = conflicts.describe(event)
+        if warning:
+            lines.insert(0, "⚠ " + warning)
+
     remaining = MAX_LINES - len(lines)
     if remaining > 0 and from_timetable:
         first = from_timetable[0]

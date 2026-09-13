@@ -31,7 +31,7 @@ PAYLOAD = [
     "alerts.py", "run_alert.ps1", "notify.ps1",
     "run_viewer.ps1", "install_autostart.ps1",
     "people.py", "profile.py", "attachments.py", "user_notes.py",
-    "calendar_store.py",
+    "calendar_store.py", "conflicts.py",
     "ui.html", "check_account.py", "run_digest.ps1", "view.ps1",
     "requirements.txt", "README.md",
 ]

@@ -574,7 +574,8 @@ function renderCal(){
     for(const e of list.slice(0,3)){
       const p=document.createElement("div");
       p.className="pill "+(isHssDue(e)?"hss":["exam","deadline"].includes(e.kind)?e.kind:"mail");
-      p.textContent=(e.start_time?e.start_time+" ":"")+e.title;
+      p.textContent=((e.clashes||[]).length?"⚠ ":"")+(e.start_time?e.start_time+" ":"")+e.title;
+      if((e.clashes||[]).length) p.title=e.title+" - clashes with "+e.clashes.map(c=>c.label).join(", ");
       p.title=e.title; cell.appendChild(p);
     }
     const extra=list.length-Math.min(list.length,3);
@@ -604,6 +605,7 @@ function evRow(e,onCal,timeLabel){
       ${meta?`<div class="evmeta">${esc(meta)}</div>`:""}
       ${e.details?`<div class="evdetails">${esc(e.details)}</div>`:""}
       ${links?`<div class="evlinks">Instructions: ${links}</div>`:""}
+      ${(e.clashes||[]).length?`<div class="evclash" style="color:var(--danger);font-weight:650;font-size:12.5px;margin-top:5px">⚠ ${e.extra_class?"Extra class clashes":"Clashes"} with ${esc(e.clashes.map(c=>c.label+" "+String(c.type||"").toLowerCase()+" "+c.start_time+"–"+c.end_time+(c.location?" ("+c.location+")":"")).join(", "))}</div>`:""}
       ${srcs?`<div class="evsrc">From: ${srcs}</div>`:""}
       ${(e.other_dates||[]).length?`<div class="evmeta">Also mentioned for ${esc(e.other_dates.map(x=>new Date(x+"T00:00:00").toLocaleDateString(undefined,{day:"numeric",month:"short"})).join(", "))} - shown once, on the date the mail gives</div>`:""}
     </div>

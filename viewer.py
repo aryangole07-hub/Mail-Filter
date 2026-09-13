@@ -263,9 +263,15 @@ def calendar_entries(start_date, end_date):
     """
     import calendar_store
 
+    import conflicts
+
     entries, suggestions = calendar_store.build(
         load_store()["mails"], start_date, end_date,
         hidden_ids=hidden_mail_ids())
+    # Anything timed that lands on another course's lecture is flagged, so a
+    # makeup class or an out-of-hours quiz that clashes is seen before the day.
+    conflicts.annotate(entries)
+    conflicts.annotate(suggestions)
     return {"entries": entries, "suggestions": suggestions}
 
 

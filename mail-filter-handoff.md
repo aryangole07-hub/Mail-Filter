@@ -612,6 +612,33 @@ other models (gemma3:4b) are not sent the flag, since non-thinking models reject
 it. Tests: no flag for a plain model, `think: false` for a thinking model, and the
 capability lookup happens once.
 
+### 2026-09-13 — Smart conflict & overlap detector
+
+Requested feature: cross-reference extra classes or rescheduled labs from mail
+against the weekly timetable and alert when a makeup class or test clashes with
+an existing course slot.
+
+`conflicts.py` (new, deterministic - no model):
+- `clashes_for(entry)` lays a timed calendar item against `courses.classes_on`
+  for its date. It clashes when its time overlaps a slot of a **different**
+  course (a FoFA quiz in the FoFA lecture is not a clash). An item without an
+  end time is taken to last 50 minutes (one BITS slot); touching end/start
+  times do not count; items without a time and weekends cannot clash.
+- `is_extra_class` recognises makeup / extra / additional / rescheduled /
+  compensatory / special / replacement classes, so the warning can say
+  "Extra class clashes with …".
+- `annotate(entries)` adds `clashes` (course label, type, times, room) and
+  `extra_class`; `describe(entry)` gives one plain sentence.
+
+Wired in:
+- `viewer.calendar_entries` annotates both calendar entries and suggestions.
+- `ui.html`: a red "⚠ Clashes with Linguistics lecture 10:00–10:50 (J Block
+  J217)" line in the day detail, and a ⚠ prefix plus tooltip on the month pill.
+- `alerts.py`: the evening reminder puts clash warnings for tomorrow first.
+
+Tests cover a makeup class over another course's lecture, own-course overlap,
+default slot length, touching times, untimed items, weekends, and the wording.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).

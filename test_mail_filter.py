@@ -1799,6 +1799,42 @@ check("one thing labelled deadline in one mail and meeting in another is one ent
       len(_kon + _koff) == 1 and (_kon + _koff)[0]["kind"] == "deadline",
       [(e["title"], e["kind"]) for e in _kon + _koff])
 
+# Clashes with the timetable (conflicts.py) - no model involved.
+import conflicts as conf_mod
+
+# Monday 14 Sep 2026: FoFA 09:00-09:50, Linguistics 10:00-10:50, TWS 14:00-14:50,
+# M3 16:00-16:50, EEB 17:00-17:50 (courses.WEEKLY).
+_makeup = {"title": "POE makeup class", "date": "2026-09-14", "start_time": "10:15",
+           "end_time": "11:05", "courses": ["ECON F211"]}
+_clash = conf_mod.clashes_for(_makeup)
+check("a makeup class over another course's lecture is a clash",
+      [c["code"] for c in _clash] == ["HSS F222"], [c["code"] for c in _clash])
+check("it is recognised as an extra class", conf_mod.is_extra_class(_makeup))
+check("a quiz in its own course's lecture slot is not a clash",
+      conf_mod.clashes_for({"title": "FoFA quiz", "date": "2026-09-14",
+                            "start_time": "09:00", "courses": ["ECON F212"]}) == [])
+check("an item with no end time is taken to last one slot",
+      [c["code"] for c in conf_mod.clashes_for(
+          {"title": "Seminar", "date": "2026-09-14", "start_time": "16:30",
+           "courses": []})] == ["MATH F201", "ECON F214"])
+check("an item that ends exactly when a class starts does not clash",
+      conf_mod.clashes_for({"title": "Talk", "date": "2026-09-14", "start_time": "13:10",
+                            "end_time": "14:00", "courses": []}) == [])
+check("an item with no time cannot clash",
+      conf_mod.clashes_for({"title": "Assignment due", "date": "2026-09-14",
+                            "courses": []}) == [])
+check("weekends have nothing to clash with",
+      conf_mod.clashes_for({"title": "Extra class", "date": "2026-09-19",
+                            "start_time": "10:00", "courses": []}) == [])
+_annotated = conf_mod.annotate([dict(_makeup)])[0]
+check("annotating says which class it clashes with, in plain words",
+      "Extra class" in conf_mod.describe(_annotated)
+      and "Linguistics lecture 10:00-10:50" in conf_mod.describe(_annotated),
+      conf_mod.describe(_annotated))
+check("nothing to say when there is no clash",
+      conf_mod.describe(conf_mod.annotate([{"title": "x", "date": "2026-09-19",
+                                           "start_time": "10:00"}])[0]) == "")
+
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
                   encoding="utf-8").read()
