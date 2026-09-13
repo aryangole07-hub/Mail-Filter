@@ -967,3 +967,16 @@ the mac user so she can set everything up".
   *Testing*, each friend's email must be added under OAuth consent screen →
   Test users, or their sign-in is refused. BITS Google Workspace admins may
   also block unverified third-party apps; that is outside the app's control.
+
+---
+
+## 2026-09-13 — Adding a Mac friend as an OAuth test user
+
+Prompt: add a friend's BITS email to the Google OAuth test users.
+
+- Google has no API or gcloud command for OAuth consent-screen test users
+  (and gcloud is not installed here), so it cannot be done from the terminal.
+- Opened the Google Auth Platform **Audience** page for project
+  `bubbly-card-508320-m3` in the browser; the user adds the address under
+  **Test users → Add users → Save**.
+- Test users are capped at 100 while the app is in Testing.
