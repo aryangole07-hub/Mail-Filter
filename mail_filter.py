@@ -1057,6 +1057,13 @@ class OllamaClient:
         schema = (output_config or {}).get("format", {}).get("schema")
         if schema:
             payload["format"] = schema
+        # A "thinking" model (gemma4) spends its whole token budget thinking
+        # before it writes a word: on 2026-09-13 every chat answer came back
+        # empty after four minutes with done_reason "length". Every caller here
+        # wants the JSON answer, not the deliberation, so thinking is switched
+        # off - only for models that have it, because the others reject it.
+        if self._thinking_capable(model):
+            payload["think"] = False
 
         data = self._request("/api/chat", payload)
         text = (data.get("message") or {}).get("content", "") or ""
@@ -1066,6 +1073,17 @@ class OllamaClient:
         if done_reason == "length":
             done_reason = "max_tokens"
         return _Reply(text, done_reason)
+
+    def _thinking_capable(self, model):
+        """Does this model think before answering? Asked once, then remembered."""
+        cache = self.__dict__.setdefault("_thinking", {})
+        if model not in cache:
+            try:
+                shown = self._request("/api/show", {"model": model}, timeout=15) or {}
+                cache[model] = "thinking" in (shown.get("capabilities") or [])
+            except Exception:  # noqa: BLE001 - unknown means "do not send it"
+                cache[model] = False
+        return cache[model]
 
     def installed_models(self):
         """Model names Ollama has locally, bare names included. [] on failure."""

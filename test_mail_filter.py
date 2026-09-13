@@ -719,6 +719,28 @@ st.create("gemma3:4b", 512, [{"role": "user", "content": "hi"}],
 _chat_calls = [p for p in st.sent if p[0] == "/api/chat"]
 path, payload = _chat_calls[0] if _chat_calls else st.sent[-1]
 check("chat goes to /api/chat", path == "/api/chat", path)
+# A thinking model spent its whole budget thinking and returned an empty answer.
+check("a model without thinking is not sent the think switch",
+      "think" not in payload, payload.keys())
+
+
+class _ThinkingStub(StubOllama):
+    def _request(self, path, payload=None, timeout=None):
+        self.sent.append((path, payload))
+        if path == "/api/show":
+            return {"capabilities": ["completion", "thinking", "vision"]}
+        return self._reply
+
+
+_thinker = _ThinkingStub()
+_thinker.create("gemma4-like", 64, [{"role": "user", "content": "hi"}])
+_think_chat = [p for p in _thinker.sent if p[0] == "/api/chat"][0][1]
+check("a thinking model is told not to think, so the answer is not starved",
+      _think_chat.get("think") is False, _think_chat)
+_thinker.create("gemma4-like", 64, [{"role": "user", "content": "again"}])
+check("whether a model thinks is asked once, not on every request",
+      [p[0] for p in _thinker.sent].count("/api/show") == 1)
+
 # CPU only, always: the PC hard-crashed twice when models ran on the display GPU.
 check("every model request keeps all layers off the GPU",
       payload["options"].get("num_gpu") == 0, payload["options"])

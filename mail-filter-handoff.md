@@ -596,6 +596,22 @@ The card was re-enabled (code 22 → 31) and fixed with an elevated
 32 GB RAM); the 26B chat model remains in the preference list but runs on the
 CPU. RoundTable shares this Ollama install, so it is CPU-only too.
 
+### 2026-09-13 — chat answers were empty: the model thought itself out of tokens
+
+The user asked for three chat checks (next exam with its source email; seating
+or room assignments; HSS teachers, HOD and Wednesday classes). All three came
+back "The local model did not answer" after ~4 minutes each. Ollama's log showed
+HTTP 200 and no truncation, so the failure was on our side. A diagnostic call
+printed the raw reply: **empty content, done_reason "length"**, prompt ~5.7k
+tokens. `gemma4:26b-a4b-it-qat` is a thinking model and spent the entire
+900-token answer budget on hidden thinking before writing any JSON.
+
+Fix: `OllamaClient.create` now sends `"think": false` for models whose
+`/api/show` capabilities include "thinking" (asked once per model and cached);
+other models (gemma3:4b) are not sent the flag, since non-thinking models reject
+it. Tests: no flag for a plain model, `think: false` for a thinking model, and the
+capability lookup happens once.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).
