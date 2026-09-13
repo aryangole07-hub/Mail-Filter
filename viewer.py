@@ -417,6 +417,11 @@ def _digest_command():
     if os.name == "nt" and os.path.exists(RUN_DIGEST_PS1):
         return (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                  "-File", RUN_DIGEST_PS1], True)
+    # macOS / Linux: the shell counterpart does the same (UTF-8, starts Ollama,
+    # writes digest.log).
+    run_digest_sh = os.path.join(SCRIPT_DIR, "run_digest.sh")
+    if os.name != "nt" and os.path.exists(run_digest_sh):
+        return (["/bin/bash", run_digest_sh], True)
     return ([sys.executable, MAIL_FILTER], False)
 
 

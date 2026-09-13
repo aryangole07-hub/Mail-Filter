@@ -2077,6 +2077,189 @@ check("a picture with no class boxes says what to do",
           (lambda p: (_Image.new("RGB", (300, 200), "white").save(p), p)[1])(
               os.path.join(tempfile.mkdtemp(), "blank.png")), read=lambda c: "")["warnings"][0])
 
+# macOS support (platforms.py and the .sh launchers) - checked on any machine.
+import plistlib as _plistlib
+import platforms as plat_mod
+
+_agents = plat_mod.launch_agents("/Users/friend/Library/Application Support/MailFilter")
+check("three LaunchAgents: digest, reminder, open at login",
+      sorted(_agents) == ["com.mailfilter.alert", "com.mailfilter.digest", "com.mailfilter.viewer"])
+check("the digest runs at 07:55 and the reminder at 20:00",
+      _agents["com.mailfilter.digest"]["StartCalendarInterval"] == {"Hour": 7, "Minute": 55}
+      and _agents["com.mailfilter.alert"]["StartCalendarInterval"] == {"Hour": 20, "Minute": 0})
+check("the viewer opens at login after a short delay",
+      _agents["com.mailfilter.viewer"]["RunAtLoad"] is True
+      and "sleep 30" in _agents["com.mailfilter.viewer"]["ProgramArguments"][2])
+check("a path with spaces is passed as one argument, not split",
+      _agents["com.mailfilter.digest"]["ProgramArguments"][1].endswith(
+          "Application Support/MailFilter/run_digest.sh"))
+check("every LaunchAgent is a valid plist",
+      all(_plistlib.loads(_plistlib.dumps(p)) == p for p in _agents.values()))
+check("launchd jobs can find Ollama and Homebrew tools",
+      "/opt/homebrew/bin" in _agents["com.mailfilter.digest"]["EnvironmentVariables"]["PATH"])
+
+_osa = plat_mod.sticky_notification_command('Quiz "2" tomorrow', "09:00 FoFA\\quiz", mac=True)
+check("on a Mac the reminder is an alert that waits to be clicked",
+      _osa[0] == "osascript" and "display alert" in _osa[2] and "Open Mail Filter" in _osa[2])
+check("quotes and backslashes in a reminder cannot break the AppleScript",
+      '\\"2\\"' in _osa[2] and "FoFA\\\\quiz" in _osa[2], _osa[2])
+check("on Linux the reminder is a critical notification",
+      plat_mod.sticky_notification_command("T", "B", mac=False)[:2] == ["notify-send", "--urgency=critical"])
+check("a Mac opens the app window in a new --app instance of the browser",
+      plat_mod.app_window_command("http://127.0.0.1:8765/", "Google Chrome", mac=True)
+      == ["open", "-na", "Google Chrome", "--args", "--app=http://127.0.0.1:8765/", "--new-window"])
+check("with no app-capable browser there is no app-window command",
+      plat_mod.app_window_command("http://x/", None, mac=True) is None)
+
+_saved_platform = m.sys.platform
+_saved_cpu_only = os.environ.pop("MAIL_FILTER_CPU_ONLY", None)
+try:
+    m.sys.platform = "darwin"
+    _mac_client = StubOllama()
+    _mac_client.create("gemma3:4b", 16, [{"role": "user", "content": "hi"}])
+    check("on a Mac the model may use Apple's GPU",
+          "num_gpu" not in [p for p in _mac_client.sent if p[0] == "/api/chat"][0][1]["options"])
+    os.environ["MAIL_FILTER_CPU_ONLY"] = "1"
+    _mac_cpu = StubOllama()
+    _mac_cpu.create("gemma3:4b", 16, [{"role": "user", "content": "hi"}])
+    check("a Mac can still be told to stay on the CPU",
+          [p for p in _mac_cpu.sent if p[0] == "/api/chat"][0][1]["options"].get("num_gpu") == 0)
+finally:
+    m.sys.platform = _saved_platform
+    os.environ.pop("MAIL_FILTER_CPU_ONLY", None)
+    if _saved_cpu_only is not None:
+        os.environ["MAIL_FILTER_CPU_ONLY"] = _saved_cpu_only
+_saved_platform2 = m.sys.platform
+try:
+    m.sys.platform = "win32"
+    _win_client = StubOllama()
+    _win_client.create("gemma3:4b", 16, [{"role": "user", "content": "hi"}])
+    check("Windows stays on the CPU",
+          [p for p in _win_client.sent if p[0] == "/api/chat"][0][1]["options"].get("num_gpu") == 0)
+finally:
+    m.sys.platform = _saved_platform2
+
+_here = os.path.dirname(os.path.abspath(__file__))
+for _sh in ("run_digest.sh", "run_viewer.sh", "run_alert.sh", "install_autostart_mac.sh"):
+    _raw = open(os.path.join(_here, _sh), "rb").read()
+    check("{} has Unix line endings and a bash shebang".format(_sh),
+          b"\r\n" not in _raw and _raw.startswith(b"#!/bin/bash"))
+check("git keeps shell scripts on Unix line endings",
+      "*.sh       text eol=lf" in io.open(os.path.join(_here, ".gitattributes"), encoding="utf-8").read())
+_cmd_raw = open(os.path.join(_here, "Install Mail Filter.command"), "rb").read()
+check("the Mac installer script has Unix line endings and a bash shebang",
+      b"\r\n" not in _cmd_raw and _cmd_raw.startswith(b"#!/bin/bash"))
+
+
+section("Setup for friends - Windows and Mac")
+
+import setup_wizard as wiz
+import build_setup as bset
+
+check("an ID gives the college mail login",
+      wiz.details_from_id("2025b3ps0420h") == {
+          "email_id": "f20250420", "email": "f20250420@hyderabad.bits-pilani.ac.in",
+          "campus": "BITS Pilani, Hyderabad Campus", "batch": "2025"})
+check("a Goa ID gets the Goa domain",
+      wiz.details_from_id("2024A7PS0123G")["email"] == "f20240123@goa.bits-pilani.ac.in")
+check("a half-typed ID gives no guessed email", wiz.details_from_id("2025A7PS") == {})
+check("good details raise no warning", wiz.check_details("Asha", "2025A7PS0001H") == [])
+check("a missing name and a short ID each get a warning, not a block",
+      len(wiz.check_details("", "2025A7")) == 2)
+check("an empty ID explains why it matters",
+      "seating" in " ".join(wiz.check_details("Asha", "")))
+check("the Mac install goes where Mac apps keep their data",
+      "Application Support" in wiz.INSTALL_DIR if sys.platform == "darwin" else True)
+check("every file the wizard installs is shipped by the build", bset.check_payload() is None,
+      bset.check_payload())
+check("the build ships the timetable reader and the cross-platform helpers",
+      {"timetable_import.py", "platforms.py", "run_viewer.sh"} <= set(bset.PAYLOAD))
+
+_zip_dir = tempfile.mkdtemp()
+_zip_path = bset.build_mac_zip(None, os.path.join(_zip_dir, "mac.zip"))
+import zipfile as _zipfile
+with _zipfile.ZipFile(_zip_path) as _zf:
+    _names = _zf.namelist()
+    _cmd_info = _zf.getinfo("Mail Filter Setup/Install Mail Filter.command")
+    _py_info = _zf.getinfo("Mail Filter Setup/viewer.py")
+    _sh_data = _zf.read("Mail Filter Setup/run_viewer.sh")
+check("the Mac zip holds the installer, the wizard and the guide",
+      {"Mail Filter Setup/Install Mail Filter.command", "Mail Filter Setup/setup_wizard.py",
+       "Mail Filter Setup/HOW TO INSTALL.txt"} <= set(_names))
+check("the Mac installer is executable once unzipped",
+      (_cmd_info.external_attr >> 16) & 0o111 == 0o111)
+check("plain app files are not marked executable", (_py_info.external_attr >> 16) & 0o111 == 0)
+check("scripts in the Mac zip have Unix line endings", b"\r\n" not in _sh_data)
+check("a zip built without credentials does not pretend to have them",
+      "Mail Filter Setup/credentials.json" not in _names)
+
+section("A friend's own timetable replaces the built-in one")
+
+_tt_path = os.path.join(_zip_dir, "timetable.json")
+with io.open(_tt_path, "w", encoding="utf-8") as _fh:
+    json.dump({
+        "courses": [{"code": "CHEM F111", "name": "General Chemistry", "short": ["Chem"],
+                     "aka": [], "profs": ["R. Rao"]},
+                    {"code": "bad code", "name": "x"}],
+        "weekly": [{"day": 0, "start": "09:00", "end": "09:50", "code": "CHEM F111",
+                    "type": "Lecture", "section": "L1", "room": "F Block 102"},
+                   {"day": 9, "start": "09:00", "code": "CHEM F111"},
+                   {"day": 1, "start": "10:00", "code": "MATH F111"}],
+        "slot_profs": [{"code": "CHEM F111", "type": "Lecture", "profs": ["R. Rao"]}],
+    }, _fh)
+_found = co.read_personal_timetable(_tt_path)
+check("a saved timetable is read back", _found is not None)
+_reg, _week, _sp = _found
+check("malformed courses are dropped", [c["code"] for c in _reg] == ["CHEM F111"])
+check("classes on a bad day or an unknown course are dropped", len(_week) == 1, _week)
+check("instructors are keyed by course and class type",
+      _sp == {("CHEM F111", "Lecture"): ["R. Rao"]})
+check("an unreadable timetable file is ignored",
+      co.read_personal_timetable(os.path.join(_zip_dir, "nope.json")) is None)
+_saved_tt = (co.COURSES, co.BY_CODE, co.WEEKLY, co.SLOT_PROFS, co._COMPILED)
+try:
+    check("loading it swaps in the friend's courses",
+          co.load_personal_timetable(_tt_path) and list(co.BY_CODE) == ["CHEM F111"]
+          and co.WEEKLY[0]["room"] == "F Block 102")
+finally:
+    co.COURSES, co.BY_CODE, co.WEEKLY, co.SLOT_PROFS, co._COMPILED = _saved_tt
+check("this repo has no timetable.json, so the owner's timetable stays built in",
+      not os.path.exists(co.TIMETABLE_FILE) and len(co.WEEKLY) == 27)
+section("Timetable instructor names")
+
+_two_lines, _ = tti.parse_cell("ECON F211 - L1\nLecture\n3:00PM - 3:50PM\nF BLOCK F103\n"
+                               "Instructors:\nMINI THOMAS\nP .,\nRISHI\nKUMAR .")
+check("names wrapped over lines are rejoined and split at the separator",
+      _two_lines["instructors"] == ["Mini Thomas P", "Rishi Kumar"], _two_lines["instructors"])
+_one_line, _ = tti.parse_cell("ECON F212 - L1\nInstructors: Utkarsh Kumar, Shobhana Sikhawal")
+check("comma-separated instructors on one line still split",
+      _one_line["instructors"] == ["Utkarsh Kumar", "Shobhana Sikhawal"], _one_line["instructors"])
+_known = ["Mini Thomas P", "Rishi Kumar", "Utkarsh Kumar", "Shobhana Sikhawal", "Pranesh Bhargava"]
+check("a misspelt instructor is corrected to the known name",
+      tti.snap_name("Praneesh Bhargava", _known) == ["Pranesh Bhargava"])
+check("run-together names are split into the known people",
+      tti.snap_name("Mini Thomas P Rishi Kumar", _known) == ["Mini Thomas P", "Rishi Kumar"])
+check("run-together and misspelt at once",
+      tti.snap_name("Utkarsh Kumar Shobhana Sikhwal", _known) == ["Utkarsh Kumar", "Shobhana Sikhawal"])
+check("an instructor the app has never heard of is kept as read",
+      tti.snap_name("Anita Desai", _known) == ["Anita Desai"])
+_boxes = [{"code": "ECON F212", "section": "L1", "instructors": ["Utkarsh কুমার Shobhana Sikhawal"]},
+          {"code": "ECON F212", "section": "L1", "instructors": ["Utkarsh Kumar Shobhana Sikhawal"]},
+          {"code": "ECON F212", "section": "L1", "instructors": ["Utkarsh Kumar Shobhana Sikhwal"]}]
+_tidy_warn = tti.tidy_instructors(_boxes, _known)
+check("every box of a class ends up with the same, correct instructors",
+      all(b["instructors"] == ["Utkarsh Kumar", "Shobhana Sikhawal"] for b in _boxes),
+      [b["instructors"] for b in _boxes])
+check("a reading fixed by agreement raises no warning", _tidy_warn == [], _tidy_warn)
+_alone = [{"code": "HSS F999", "section": "L1", "instructors": ["Asha কু Rao"]}]
+_alone_warn = tti.tidy_instructors(_alone, [])
+check("a name with stray script and nothing to compare is cleaned and flagged",
+      _alone[0]["instructors"] == ["Asha Rao"] and len(_alone_warn) == 1, (_alone, _alone_warn))
+check("the registry supplies real names, not mail handles",
+      "utkarsh.k" not in tti.known_instructors() and "Pranesh Bhargava" in tti.known_instructors())
+check("a friend's timetable is never committed",
+      "timetable.json" in io.open(os.path.join(_here, ".gitignore"), encoding="utf-8").read())
+
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
                   encoding="utf-8").read()

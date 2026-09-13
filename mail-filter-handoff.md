@@ -780,3 +780,165 @@ PC; everything here ran on the CPU.)
 - Any stack change for very-low-VRAM machines (the user's "repo that shrinks
   Gemma") is on hold: when asked which repo, the user named the Mail Filter repo;
   no quantisation project has been chosen.
+
+---
+
+## 2026-09-13 — macOS support, the friends' setup for Windows and Mac, own timetables
+
+Prompt: "continue. i want to give the app to my friends that use mac os also.
+make it compatable with that also".
+
+### macOS support
+- **`platforms.py` (new)** holds everything that differs by system:
+  - Where the app lives:
+    - Windows: `%LOCALAPPDATA%\MailFilter`
+    - Mac: `~/Library/Application Support/MailFilter`
+    - Linux: XDG data folder
+  - The venv's Python, and the flags that hide console windows.
+  - **App window:** finds Chrome, Edge, Brave or Chromium and opens
+    `--app=http://127.0.0.1:8765/`. On a Mac it runs
+    `open -na "<browser>" --args --app=… --new-window`; with no such browser it
+    falls back to the default browser.
+  - **Sticky reminder on a Mac:** `osascript display alert` stays on screen until
+    it is clicked (Dismiss / Open Mail Filter). The text is AppleScript-escaped,
+    so quotes in a mail title cannot break out. Linux uses
+    `notify-send --urgency=critical`.
+  - **LaunchAgents** in `~/Library/LaunchAgents`, the Mac version of Task
+    Scheduler:
+    - `com.mailfilter.digest` runs every day at 07:55.
+    - `com.mailfilter.alert` runs every day at 20:00.
+    - `com.mailfilter.viewer` opens the app at login, 30 s after sign-in.
+    - PATH includes `/opt/homebrew/bin` and `/usr/local/bin`, so Ollama is found.
+    - Plist paths are joined with "/" even when built on Windows, so a path with
+      spaces ("Application Support") stays one argument.
+    - `install_launch_agents` uses `launchctl bootstrap`, falling back to
+      `load -w`. There is also `uninstall_launch_agents`.
+    - Command line: `python platforms.py install-launch-agents | uninstall-launch-agents | open-window`.
+- **Mac launchers (new, LF line endings; `.gitattributes` keeps them LF):**
+  - `run_digest.sh` starts Ollama.app (or `ollama serve`) if needed, runs the
+    digest, rotates the log and writes the same run markers as Windows.
+  - `run_viewer.sh` starts the viewer once (port and process check) and opens
+    the app window.
+  - `run_alert.sh` runs the evening reminder.
+  - `install_autostart_mac.sh [--uninstall]` installs or removes the three
+    LaunchAgents.
+- **`alerts.py`:** off Windows, the reminder is shown with
+  `platforms.notify_sticky`.
+- **`viewer.py`:** off Windows, the refresh button runs `run_digest.sh`.
+- **GPU policy (`mail_filter.py`):**
+  - Windows and Linux stay CPU-only (`num_gpu 0`), exactly as before. The
+    lockout on this PC is untouched.
+  - On a Mac the model may use Apple's unified-memory GPU. There is no separate
+    video memory to exhaust and no display driver to break. `MAIL_FILTER_CPU_ONLY=1`
+    keeps a Mac on the CPU too.
+  - Tests check all three cases.
+
+### Friends' setup, both systems
+- **`setup_wizard.py` (rewritten, cross-platform)**, four screens:
+  1. **Welcome.**
+  2. **Name + BITS ID.** The mail login, campus and batch are worked out from
+     the ID: `2025B3PS0420H` gives `f20250420@hyderabad…`, and the Pilani, Goa
+     and Dubai domains are handled too. An empty name or a malformed ID shows a
+     yellow warning and the button becomes **Continue regardless**.
+  3. **Timetable picture.** Step-by-step ERP instructions (tick every Display
+     Option, screenshot the whole week, Win+Shift+S / Cmd+Shift+4), then
+     **Choose picture…**. With no picture it warns once, then **Continue regardless**.
+  4. **Install.** Everything else is automatic:
+     - Copies the app.
+     - Finds or installs Python (Windows).
+     - Creates the venv and installs requirements.
+     - Installs Ollama: `OllamaSetup.exe` silently on Windows; on a Mac,
+       `Ollama-darwin.zip` unpacked with `ditto` into `~/Applications`.
+     - Starts Ollama and downloads gemma3:4b with a progress bar.
+     - Writes `profile.json` (name, ID, email, campus, batch).
+     - **Reads the timetable picture** (`timetable_import.py --save --report`,
+       progress per box).
+     - Opens Google sign-in (first 14-day backfill), then `profile.py --detect`.
+     - Schedules the jobs: schtasks + `install_autostart.ps1` on Windows,
+       `install_autostart_mac.sh` on a Mac.
+     - Creates a desktop shortcut: `.lnk` on Windows, `Mail Filter.command` on a Mac.
+     - Opens the app.
+- **Timetable warnings mid-install:** if any box is missing a field, the
+  install pauses on a screen listing exactly what is missing, e.g.
+  "Friday 14:00 (HSS F352): could not read the room". The choices are
+  **Continue regardless** or **Choose another picture…**, which reads the new
+  picture instead.
+- **Fixed:** `APP_FILES` was stale. It lacked people.py, profile.py,
+  attachments.py, calendar_store.py, conflicts.py, todo_store.py, marks.py,
+  user_notes.py, the timetable importer and platforms.py, so a friend's install
+  would have crashed. The build now refuses to run if the wizard installs a file
+  the build does not ship (tested).
+- **`Install Mail Filter.command` (new):** the Mac entry point, a right-click →
+  Open. It looks for a Python 3.10+ with tkinter (python.org framework builds,
+  Homebrew, PATH). If there is none, it downloads the official python.org
+  installer, opens it and says to run the installer again afterwards. Then it
+  runs the wizard.
+- **`build_setup.py`** now builds:
+  - `dist/setup.exe` (Windows, PyInstaller, as before but with the full payload).
+  - `dist/MailFilter-mac.zip`: a "Mail Filter Setup" folder with the app, the
+    wizard, the `.command` and `HOW TO INSTALL.txt`. Zip entries carry Unix
+    permissions: scripts 755 and LF, other files 644.
+  - `--exe` or `--mac` builds just one. Both embed `credentials.json`: share
+    them directly, never publicly.
+- **`SETUP-FOR-FRIENDS.md` (new):** very plain instructions:
+  - Before you start: the ERP screenshot with every Display Option ticked, and
+    your ID.
+  - Windows steps, including "Windows protected your PC" → More info → Run anyway.
+  - Mac steps, including the right-click → Open for unknown developers and the
+    Python installer.
+  - The Google "hasn't verified this app" → Advanced → Go to Mail Filter step.
+  - What each warning means, and what happens after setup.
+
+### A friend's own timetable
+- **`courses.py`** loads `timetable.json` at import when it exists. It replaces
+  COURSES, BY_CODE, WEEKLY and SLOT_PROFS and recompiles the course matchers, so
+  every module sees the friend's own courses, rooms and instructors. Malformed
+  courses, bad days and classes for unknown courses are dropped, and an
+  unreadable file is ignored. `timetable.json` is gitignored. This repo has no
+  such file, so the owner's built-in timetable is unchanged (tested).
+
+### Timetable reading, measured
+- **Full CPU run on the real screenshot:** 27 boxes in 600 s, scored field by
+  field against the known timetable:
+  - day+start 27/27; code, section, type, end time and room all 27/27.
+  - **instructors 20/27.** Two names ran together (the model dropped the ".,"
+    separator), one name had a word in Bengali script, and "Pranesh" was read
+    as "Praneesh".
+- **Fixes in `timetable_import.py`:**
+  - `read_instructors` rejoins the wrapped lines after "Instructors:" and splits
+    them at the separators.
+  - `snap_name` matches misspelt names to known instructors (difflib ≥ 0.85) and
+    splits run-together names into known people, longest match first. Unknown
+    instructors are kept as read.
+  - `tidy_instructors` gives every box of the same class (course + section) the
+    reading most boxes agree on. It prefers readings without non-Latin letters,
+    and cleans and flags a name that is still garbled.
+  - The prompt now asks for commas between instructors.
+- **Re-scored on the saved run (no model): instructors 27/27, no warnings.**
+
+### Tests
+- 642 passed, 0 failed. New checks cover:
+  - LaunchAgents: schedule, login delay, path with spaces.
+  - AppleScript escaping, Linux notify, the Mac app-window command.
+  - GPU policy per system; LF endings for the `.sh`/`.command` files and `.gitattributes`.
+  - ID → email/campus, the details warnings, payload completeness.
+  - Mac zip contents, permissions and line endings; no credentials when none are given.
+  - Loading a personal timetable and discarding bad data.
+  - Instructor rejoining, snapping, splitting, agreement and garbled-name warnings.
+
+### Not verified
+- **Nothing has been run on a real Mac** (only this Windows PC is available).
+  The shell scripts pass `bash -n`, and the plists, commands and zip are unit
+  tested. The first friend's Mac install is the real test: if something fails,
+  their "Setup could not finish" message says which step.
+- The mid-install timetable warning screen and the Mac Ollama unzip are
+  untested end to end.
+
+### Still to do (as of this entry)
+- Run the Mac installer on a real Mac and fix whatever it reports.
+- Rebuild `dist/setup.exe` and `dist/MailFilter-mac.zip` with
+  `build_setup.py` before sharing.
+- Verify a real seating sheet end to end when one arrives.
+- OCR for scanned PDFs, if wanted.
+- Chat: answers that cite mail but report found=false are styled "not found".
+- Old events lack `details`/`link` (re-extraction not done).

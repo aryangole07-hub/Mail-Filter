@@ -11,6 +11,7 @@ mail from them is tagged with that course even when the subject never names
 it. That is what catches a bare "Re: Handout" from a lecturer.
 """
 
+import os
 import re
 from datetime import date, datetime, timedelta
 
@@ -355,3 +356,79 @@ def timetable_block(today=None):
         return ""
     return ("Your weekly timetable (every week of the semester, not a one-off):\n"
             + "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# A personal timetable, imported from a screenshot during setup
+# ---------------------------------------------------------------------------
+# The registry and timetable above are the original owner's. A friend's install
+# writes timetable.json (timetable_import.py) and it replaces them at import, so
+# every module that reads courses.COURSES / WEEKLY / SLOT_PROFS sees the friend's
+# own courses. The file is personal and gitignored.
+
+TIMETABLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timetable.json")
+
+
+def read_personal_timetable(path=None):
+    """(courses, weekly, slot_profs) from timetable.json, or None if unusable."""
+    import json
+
+    try:
+        with open(path or TIMETABLE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    registry = []
+    for course in data.get("courses") or []:
+        if not isinstance(course, dict) or not re.match(r"^[A-Z]{2,5} F\d{3}$", str(course.get("code", ""))):
+            continue
+        registry.append({
+            "code": course["code"],
+            "name": str(course.get("name") or course["code"]),
+            "short": [str(s) for s in course.get("short") or [] if s],
+            "aka": [str(s) for s in course.get("aka") or [] if s],
+            "profs": [str(s) for s in course.get("profs") or [] if s],
+        })
+    codes = {c["code"] for c in registry}
+
+    weekly = []
+    for slot in data.get("weekly") or []:
+        if not isinstance(slot, dict) or slot.get("code") not in codes:
+            continue
+        day = slot.get("day")
+        if not isinstance(day, int) or not 0 <= day <= 6:
+            continue
+        if not re.match(r"^\d{2}:\d{2}$", str(slot.get("start", ""))):
+            continue
+        weekly.append({"day": day, "start": slot["start"],
+                       "end": slot.get("end") if re.match(r"^\d{2}:\d{2}$", str(slot.get("end", ""))) else "",
+                       "code": slot["code"], "type": str(slot.get("type") or "Lecture"),
+                       "section": str(slot.get("section") or ""), "room": str(slot.get("room") or "")})
+
+    profs = {}
+    for row in data.get("slot_profs") or []:
+        if isinstance(row, dict) and row.get("code") in codes:
+            profs[(row["code"], str(row.get("type") or "Lecture"))] = [
+                str(p) for p in row.get("profs") or [] if p]
+
+    if not registry or not weekly:
+        return None
+    return registry, weekly, profs
+
+
+def load_personal_timetable(path=None):
+    """Replace the built-in timetable with timetable.json. True if it was used."""
+    global COURSES, BY_CODE, WEEKLY, SLOT_PROFS, _COMPILED
+    found = read_personal_timetable(path)
+    if not found:
+        return False
+    COURSES, WEEKLY, SLOT_PROFS = found
+    BY_CODE = {c["code"]: c for c in COURSES}
+    _COMPILED = _compile()
+    return True
+
+
+load_personal_timetable()

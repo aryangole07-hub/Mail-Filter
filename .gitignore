@@ -19,6 +19,8 @@ user_notes.json
 calendar_overrides.json
 todos.json
 marks.json
+timetable.json
+launchd.log
 attachments/
 *.backup
 *.bak

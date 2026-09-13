@@ -1039,7 +1039,13 @@ class OllamaClient:
         # even if Ollama itself were somehow allowed to see the card again.
         # A GPU can only be used by setting MAIL_FILTER_ALLOW_GPU=1 on purpose,
         # and even then the VRAM guard above still applies.
-        if os.environ.get("MAIL_FILTER_ALLOW_GPU") == "1":
+        # On a Mac the GPU is Apple's own (Metal, unified memory) and does not
+        # share the AMD-on-Windows failure, so friends on macOS get it by default
+        # unless MAIL_FILTER_CPU_ONLY=1. Windows and Linux stay on the CPU.
+        allow_gpu = (os.environ.get("MAIL_FILTER_ALLOW_GPU") == "1"
+                     or (sys.platform == "darwin"
+                         and os.environ.get("MAIL_FILTER_CPU_ONLY") != "1"))
+        if allow_gpu:
             options.update(self._placement_options(model, num_ctx))
         else:
             options["num_gpu"] = 0

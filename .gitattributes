@@ -1,0 +1,4 @@
+# Shell scripts and macOS double-click installers must keep Unix line endings:
+# with Windows (CRLF) endings bash fails on a Mac with "\r: command not found".
+*.sh       text eol=lf
+*.command  text eol=lf

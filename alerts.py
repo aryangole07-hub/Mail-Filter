@@ -155,9 +155,15 @@ def notify(title, body):
     itself on a machine where the toast platform is unavailable (exit 2).
     """
     if os.name != "nt":
+        # macOS: an alert dialog that stays until clicked (notifications fade);
+        # Linux: a critical notify-send. Printed as well, for the log.
         print(title)
         print(body)
-        return True
+        try:
+            import platforms
+            return platforms.notify_sticky(title, body) or True
+        except Exception:  # noqa: BLE001 - a failed popup must not crash the task
+            return True
 
     if not os.path.exists(NOTIFY_SCRIPT):
         print("Could not show a notification (notify.ps1 is missing).",

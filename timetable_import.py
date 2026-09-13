@@ -31,6 +31,7 @@ its built-in timetable.
 """
 
 import base64
+import difflib
 import io
 import json
 import os
@@ -56,7 +57,8 @@ INSTRUCTORS_RE = re.compile(r"instructors?\s*[:;]\s*(.*)$", re.I | re.S)
 
 TRANSCRIBE_PROMPT = (
     "This is one box from a university class timetable. Transcribe every line of "
-    "text in it exactly as written, top to bottom, keeping the line breaks. Do not "
+    "text in it exactly as written, top to bottom, keeping the line breaks. If "
+    "several instructors are listed, separate their names with commas. Do not "
     "correct, reorder or explain anything. Output only the text.")
 
 
@@ -83,6 +85,32 @@ def _title(words):
         low = word.lower()
         out.append(low if n and low in small else low[:1].upper() + low[1:])
     return " ".join(out)
+
+
+def read_instructors(lines):
+    """Names after "Instructors:", up to the next field.
+
+    The ERP wraps each name over several lines and separates people with ".,",
+    so the lines are rejoined and split on the separators. When the model drops
+    the separators, tidy_instructors splits the names against known instructors.
+    """
+    for n, line in enumerate(lines):
+        found = INSTRUCTORS_RE.search(line)
+        if not found:
+            continue
+        chunks = [found.group(1)]
+        for extra in lines[n + 1:]:
+            if (CODE_RE.search(extra.upper()) or TIME_RE.search(extra) or ROOM_RE.search(extra)
+                    or TYPE_RE.search(extra) or re.search(r"^\w[\w ]*:", extra)):
+                break
+            chunks.append(extra)
+        names = []
+        for part in re.split(r",|;|&|\band\b", " ".join(chunks)):
+            name = re.sub(r"[.\s]+$", "", " ".join(part.replace(".", " ").split()))
+            if re.search(r"[A-Za-z]{2}", name):
+                names.append(_title(name))
+        return names
+    return []
 
 
 def parse_cell(text):
@@ -122,14 +150,7 @@ def parse_cell(text):
         slot["room"] = "{} Block {}".format(room.group(1).upper(),
                                             room.group(2).replace(" ", "").upper())
 
-    who = INSTRUCTORS_RE.search(joined)
-    if who:
-        names = []
-        for part in re.split(r",|;|\band\b", who.group(1)):
-            name = re.sub(r"[.\s]+$", "", " ".join(part.replace(".", " ").split()))
-            if re.search(r"[A-Za-z]{2}", name):
-                names.append(_title(name))
-        slot["instructors"] = names
+    slot["instructors"] = read_instructors(lines)
 
     # The course name sits between the code and the class type (or the time).
     if code:
@@ -300,11 +321,96 @@ def transcribe(client, model, crop):
     return ""
 
 
-def import_screenshot(path, client=None, model="gemma3:4b", read=None, progress=None):
+def known_instructors():
+    """Full instructor names the app already knows (the course registry)."""
+    import courses
+
+    names = []
+    for course in courses.COURSES:
+        names += course.get("profs") or []
+    for people in courses.SLOT_PROFS.values():
+        names += people
+    # "utkarsh.k" style handles are for matching mail, not names on a timetable.
+    return [n for n in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z][A-Za-z.' -]* [A-Za-z.' -]+", n)]
+
+
+def _likeness(a, b):
+    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def snap_name(name, known, cutoff=0.85):
+    """A misread or run-together name -> the known instructor(s) it spells.
+
+    "Praneesh Bhargava" -> ["Pranesh Bhargava"]; "Mini Thomas P Rishi Kumar" ->
+    ["Mini Thomas P", "Rishi Kumar"]. Anything not wholly made of known names
+    is returned unchanged: an unknown instructor is still a real instructor.
+    """
+    tokens = name.split()
+    out, i = [], 0
+    while i < len(tokens):
+        for j in range(len(tokens), i, -1):  # longest span first
+            span = " ".join(tokens[i:j])
+            best = max(known, key=lambda k: _likeness(span, k), default=None)
+            if best and _likeness(span, best) >= cutoff:
+                out.append(best)
+                i = j
+                break
+        else:
+            return [name]
+    return out or [name]
+
+
+def _latin(name):
+    return all(ord(ch) < 0x250 for ch in name)
+
+
+def tidy_instructors(slots, known=None):
+    """Fix instructor names across the whole timetable. Returns warnings.
+
+    Each name is matched to known instructors; then every box of the same class
+    (course + section) takes the reading most boxes agree on, preferring readings
+    without stray non-Latin letters - the model occasionally wrote one word of a
+    name in another script.
+    """
+    known = known_instructors() if known is None else known
+    for slot in slots:
+        names = []
+        for name in slot.get("instructors") or []:
+            for person in (snap_name(name, known) if known else [name]):
+                if person not in names:
+                    names.append(person)
+        slot["instructors"] = names
+
+    groups = {}
+    for slot in slots:
+        if slot.get("code") and slot.get("instructors"):
+            key = (slot["code"], slot.get("section") or slot.get("type") or "")
+            groups.setdefault(key, []).append(slot)
+    for group in groups.values():
+        readings = [tuple(s["instructors"]) for s in group]
+        clean = [r for r in readings if all(_latin(n) for n in r)] or readings
+        best = max(clean, key=lambda r: (clean.count(r), -clean.index(r)))
+        for slot in group:
+            slot["instructors"] = list(best)
+
+    warnings = []
+    for slot in slots:
+        odd = [n for n in slot.get("instructors") or [] if not _latin(n)]
+        if odd:
+            slot["instructors"] = [" ".join("".join(ch if _latin(ch) else " " for ch in n).split())
+                                   for n in slot["instructors"]]
+            warnings.append("{} {}: an instructor's name was partly unreadable - check it."
+                            .format(slot.get("code") or "A class", slot.get("section") or ""))
+    return list(dict.fromkeys(w.replace(" :", ":") for w in warnings))
+
+
+def import_screenshot(path, client=None, model="gemma3:4b", read=None, progress=None,
+                      known=None):
     """Read a timetable screenshot. Returns {"slots", "warnings", "boxes"}.
 
     `read(crop) -> text` can replace the model (tests, or a different reader).
-    `progress(done, total)` is called after each box.
+    `progress(done, total)` is called after each box. `known` is the list of
+    instructor names to correct against (default: the course registry).
     """
     from PIL import Image
 
@@ -343,6 +449,8 @@ def import_screenshot(path, client=None, model="gemma3:4b", read=None, progress=
         slots.append(slot)
         if progress:
             progress(number, len(placed))
+
+    warnings += tidy_instructors(slots, known)
 
     seen = {}
     for slot in slots:
@@ -426,6 +534,8 @@ def main():
     parser = argparse.ArgumentParser(description="Import a timetable screenshot.")
     parser.add_argument("image", help="Screenshot of the ERP weekly schedule")
     parser.add_argument("--save", action="store_true", help="Write timetable.json")
+    parser.add_argument("--report", help="Also write {boxes, classes, courses, warnings} "
+                                         "as JSON to this file (used by setup)")
     args = parser.parse_args()
 
     import courses
@@ -446,6 +556,11 @@ def main():
         print("WARNING: " + warning)
     if args.save:
         print("saved to " + save(timetable))
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as fh:
+            json.dump({"boxes": result["boxes"], "classes": len(timetable["weekly"]),
+                       "courses": [c["code"] for c in timetable["courses"]],
+                       "warnings": result["warnings"]}, fh, indent=2)
     return 0
 
 
