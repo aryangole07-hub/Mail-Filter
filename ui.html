@@ -222,6 +222,34 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 .notebody{white-space:pre-wrap;font-size:14px;line-height:1.55;}
 .notemeta{display:flex;justify-content:space-between;align-items:center;font-size:12px;
   color:var(--muted);margin-top:6px;}
+/* to-do */
+.todoadd{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+.todoadd input{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  border-radius:11px;padding:10px 12px;font:inherit;font-size:14px;}
+.todoadd #todotext{flex:1 1 280px;}
+.todoadd input:focus{outline:none;border-color:var(--accent);}
+.todofilters{display:flex;gap:14px;align-items:center;font-size:13px;color:var(--muted);margin-bottom:10px;}
+.todolist{list-style:none;margin:0;padding:0;}
+.todo{display:flex;gap:10px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);
+  border-radius:11px;padding:10px 12px;margin-bottom:7px;transition:border-color .12s ease;}
+.todo.dragging{opacity:.45;}
+.todo.over{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 25%,transparent);}
+.todo .grip{cursor:grab;color:var(--muted);user-select:none;padding-top:1px;letter-spacing:-2px;}
+.todo.done .grip{visibility:hidden;}
+.todo input[type=checkbox]{width:18px;height:18px;margin-top:2px;accent-color:var(--accent);cursor:pointer;flex:none;}
+.todo .tbody{flex:1;min-width:0;}
+.todo .ttext{font-size:14.5px;line-height:1.45;word-break:break-word;outline:none;border-radius:5px;padding:0 3px;margin-left:-3px;}
+.todo .ttext:focus{background:var(--accent-soft);}
+.todo.done .ttext{text-decoration:line-through;color:var(--muted);}
+.todo .tmeta{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:3px;align-items:center;}
+.todo .tmeta a{color:var(--accent);}
+.due{font-weight:650;}
+.due.overdue{color:var(--danger);}
+.due.today{color:var(--hss);}
+.srcchip{border:1px solid var(--line);border-radius:999px;padding:1px 8px;cursor:pointer;}
+.srcchip:hover{border-color:var(--accent);color:var(--accent);}
+.todo .tdel{background:none;border:0;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:3px 5px;border-radius:6px;}
+.todo .tdel:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent);}
 .askbox{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
 .askbox input{flex:1 1 300px;background:var(--panel);border:1px solid var(--line);
   color:var(--ink);border-radius:11px;padding:12px 14px;font:inherit;font-size:14.5px;}
@@ -296,6 +324,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
   <nav class="views">
     <button data-v="mail" aria-selected="true">Mail</button>
     <button data-v="calendar" aria-selected="false">Calendar</button>
+    <button data-v="todo" aria-selected="false">To-Do</button>
     <button data-v="ask" aria-selected="false">Ask</button>
     <button data-v="notes" aria-selected="false">Notes</button>
   </nav>
@@ -347,6 +376,23 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     </div>
     <div class="daydetail" id="daydetail"></div>
     <div class="suggest" id="suggest"></div>
+  </section>
+
+  <!-- TO-DO -->
+  <section id="v-todo" class="hidden">
+    <div class="todoadd">
+      <input id="todotext" placeholder="Add a task - e.g. Upload PPT before tutorial" autocomplete="off">
+      <input type="date" id="tododate" title="Due date (optional)">
+      <input type="time" id="todotime" title="Due time (optional)">
+      <button class="btn primary" id="todoaddbtn">Add</button>
+    </div>
+    <div class="todofilters">
+      <label><input type="checkbox" id="todoshowdone"> Show done</label>
+      <span id="todocount"></span>
+      <span>Drag ⋮⋮ or press Alt+↑/↓ to reorder · click a task to rename it</span>
+    </div>
+    <ul class="todolist" id="todolist"></ul>
+    <div id="tododone"></div>
   </section>
 
   <!-- ASK -->
@@ -792,6 +838,115 @@ async function addNote(){
   $("#noteadd").disabled=false;
 }
 
+/* ---- to-do: your tasks plus the ones your mail sets you ---- */
+let TODOS={open:[],done:[]};
+async function loadTodos(){
+  try{ TODOS=await (await fetch("/api/todos")).json(); }catch(err){ TODOS={open:[],done:[]}; }
+  renderTodos();
+}
+function dueLabel(t){
+  if(!t.due_date) return "";
+  const d=new Date(t.due_date+"T00:00:00").toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"});
+  const lead=t.overdue?"Overdue · ":t.due_today?"Today · ":"Due ";
+  return `<span class="due${t.overdue?" overdue":t.due_today?" today":""}">${lead}${esc(d)}${t.due_time?" "+esc(t.due_time):""}</span>`;
+}
+function todoItem(t){
+  const src=t.source==="mail"
+    ? `<span class="srcchip" data-open="${esc(t.mail_id||"")}" title="Open: ${esc(t.mail_subject||"")}">from mail · ${esc((t.mail_subject||"").slice(0,48))}</span>`
+    : `<span>added by you</span>`;
+  const links=(t.links||[]).map(u=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a>`).join(" ");
+  return `<li class="todo${t.done?" done":""}" draggable="${t.done?"false":"true"}" data-id="${esc(t.id)}">
+    <span class="grip" title="Drag to reorder">⋮⋮</span>
+    <input type="checkbox" ${t.done?"checked":""} title="${t.done?"Mark not done":"Mark done"}">
+    <div class="tbody">
+      <div class="ttext" contenteditable="true" spellcheck="false" title="Click to rename">${esc(t.text)}</div>
+      <div class="tmeta">${dueLabel(t)} ${src} ${links}</div>
+      ${t.details?`<div class="tmeta">${esc(t.details)}</div>`:""}
+    </div>
+    <button class="tdel" title="Remove">✕</button>
+  </li>`;
+}
+function renderTodos(){
+  $("#todolist").innerHTML=TODOS.open.map(todoItem).join("")
+    || `<li class="hint">Nothing to do. Add something above, or it will appear here when your mail sets you a task.</li>`;
+  const showDone=$("#todoshowdone").checked;
+  $("#tododone").innerHTML=showDone&&TODOS.done.length
+    ? `<div class="sectitle">Done · ${TODOS.done.length}</div><ul class="todolist">${TODOS.done.map(todoItem).join("")}</ul>` : "";
+  $("#todocount").textContent=`${TODOS.open.length} open · ${TODOS.done.length} done`;
+  wireTodos($("#v-todo"));
+}
+async function todoPost(path,body){
+  const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+async function saveTodoOrder(ids){
+  TODOS.open.sort((a,b)=>ids.indexOf(a.id)-ids.indexOf(b.id));
+  renderTodos();
+  try{ await todoPost("/api/todos/order",{ids}); }
+  catch(err){ showToast("Could not save the order: "+err.message,false); }
+}
+function wireTodos(root){
+  root.querySelectorAll(".todo").forEach(li=>{
+    const id=li.dataset.id;
+    li.querySelector("input[type=checkbox]").onchange=async e=>{
+      try{
+        await todoPost("/api/todos/update",{id,done:e.target.checked});
+        if(e.target.checked) showToast("Done.",false);
+        loadTodos();
+      }catch(err){ showToast("Could not update: "+err.message,false); }
+    };
+    li.querySelector(".tdel").onclick=async()=>{
+      try{ await todoPost("/api/todos/delete",{id}); showToast("Removed.",false); loadTodos(); }
+      catch(err){ showToast("Could not remove: "+err.message,false); }
+    };
+    const txt=li.querySelector(".ttext");
+    txt.onkeydown=e=>{
+      if(e.key==="Enter"){ e.preventDefault(); txt.blur(); return; }
+      if(e.altKey&&(e.key==="ArrowUp"||e.key==="ArrowDown")){
+        e.preventDefault();
+        const ids=TODOS.open.map(t=>t.id), at=ids.indexOf(id);
+        const to=at+(e.key==="ArrowUp"?-1:1);
+        if(at<0||to<0||to>=ids.length) return;
+        ids.splice(at,1); ids.splice(to,0,id);
+        saveTodoOrder(ids).then(()=>{ const again=$(`.todo[data-id="${CSS.escape(id)}"] .ttext`); if(again) again.focus(); });
+      }
+    };
+    txt.onblur=async()=>{
+      const text=txt.textContent.trim();
+      const item=[...TODOS.open,...TODOS.done].find(x=>x.id===id);
+      if(!item) return;
+      if(!text){ txt.textContent=item.text; return; }
+      if(text===item.text) return;
+      try{ await todoPost("/api/todos/update",{id,text}); item.text=text; }
+      catch(err){ showToast("Could not rename: "+err.message,false); txt.textContent=item.text; }
+    };
+    const chip=li.querySelector("[data-open]");
+    if(chip) chip.onclick=()=>{ const m=MAILS.find(x=>x.id===chip.dataset.open); if(m) openOriginal(m); };
+    li.addEventListener("dragstart",e=>{ li.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; e.dataTransfer.setData("text/plain",id); });
+    li.addEventListener("dragend",()=>{ li.classList.remove("dragging"); root.querySelectorAll(".over").forEach(x=>x.classList.remove("over")); });
+    li.addEventListener("dragover",e=>{ if(TODOS.open.some(t=>t.id===id)){ e.preventDefault(); li.classList.add("over"); } });
+    li.addEventListener("dragleave",()=>li.classList.remove("over"));
+    li.addEventListener("drop",e=>{
+      e.preventDefault(); li.classList.remove("over");
+      const moved=e.dataTransfer.getData("text/plain");
+      const ids=TODOS.open.map(t=>t.id);
+      if(!moved||moved===id||!ids.includes(moved)||!ids.includes(id)) return;
+      ids.splice(ids.indexOf(moved),1);
+      ids.splice(ids.indexOf(id),0,moved);
+      saveTodoOrder(ids);
+    });
+  });
+}
+async function addTodo(){
+  const text=$("#todotext").value.trim(); if(!text) return;
+  try{
+    await todoPost("/api/todos/add",{text,due_date:$("#tododate").value,due_time:$("#todotime").value});
+    $("#todotext").value=""; $("#tododate").value=""; $("#todotime").value="";
+    loadTodos();
+  }catch(err){ showToast("Could not add: "+err.message,false); }
+}
+
 function newChat(){
   CHAT=[];
   try{ sessionStorage.removeItem("mf-chat"); }catch(e){}
@@ -875,6 +1030,8 @@ $$("nav.views button").forEach(b=>{
     $("#v-calendar").classList.toggle("hidden",VIEW!=="calendar");
     $("#v-ask").classList.toggle("hidden",VIEW!=="ask");
     $("#v-notes").classList.toggle("hidden",VIEW!=="notes");
+    $("#v-todo").classList.toggle("hidden",VIEW!=="todo");
+    if(VIEW==="todo"){ loadTodos(); }
     if(VIEW==="notes"){ loadNotes(); }
     if(VIEW==="calendar"){ loadCalendar(); }
     if(VIEW==="ask"){ $("#qq").focus(); }
@@ -908,6 +1065,9 @@ document.addEventListener("keydown",e=>{
 $("#askbtn").onclick=doAsk;
 $("#newchat").onclick=newChat;
 $("#noteadd").onclick=addNote;
+$("#todoaddbtn").onclick=addTodo;
+$("#todotext").addEventListener("keydown",e=>{ if(e.key==="Enter") addTodo(); });
+$("#todoshowdone").onchange=renderTodos;
 $("#qq").addEventListener("keydown",e=>{ if(e.key==="Enter") doAsk(); });
 renderChat();
 $("#prev").onclick=()=>{ CALMONTH.setMonth(CALMONTH.getMonth()-1); loadCalendar(); };

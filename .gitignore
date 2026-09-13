@@ -17,6 +17,7 @@ run.lock
 profile.json
 user_notes.json
 calendar_overrides.json
+todos.json
 attachments/
 *.backup
 *.bak

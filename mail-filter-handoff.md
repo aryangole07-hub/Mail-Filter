@@ -639,9 +639,50 @@ Wired in:
 Tests cover a makeup class over another course's lecture, own-course overlap,
 default slot length, touching times, untimed items, weekends, and the wording.
 
+### 2026-09-13 — To-Do list
+
+Requested: extract pending tasks from mail into a To-Do section with
+checkboxes, let the student add their own, reorder by drag and drop, plus any
+other UI/UX that helps (examples: "Fill Google form by 5 PM", "Upload PPT before
+tutorial").
+
+`todo_store.py` (new, no model; `todos.json` gitignored):
+- **Mail tasks** are rebuilt from the mail on every load: every deadline from
+  `calendar_store.build` (already merged, so one assignment is one task, with its
+  details and instruction links), plus **action sentences** - an instruction verb
+  aimed at the student (fill, submit, upload, register, pay, bring, attend, …,
+  optionally after "please / kindly / you must / all students must") with a
+  limit ("by / before / until / no later than / within …"), at most 3 per mail,
+  never from filtered (Ignore) mail.
+- **Your tasks**: text plus optional due date/time; newest at the top.
+- **State survives rebuilds** through stable keys: ticking a mail task off,
+  renaming it, or dragging it keeps; removing a mail task dismisses it so it does
+  not come back. Unplaced tasks sort soonest-due first. A mail task more than 14
+  days past its due date and never ticked off is dropped, so the list stays
+  about what is still live; ticked-off tasks stay under Done.
+- Each item carries `overdue` / `due_today`.
+
+Viewer API: `GET /api/todos`; `POST /api/todos/add|update|delete|order`.
+
+UI (new **To-Do** tab): add box with optional date and time (Enter adds);
+checkbox to tick off; click the text to rename (Enter saves, empty reverts);
+✕ to remove; drag the ⋮⋮ grip to reorder, or Alt+↑/↓ from the keyboard; due
+badges ("Overdue", "Today" in orange, "Due Mon 14 Sep 17:00"); a "from mail"
+chip that opens the source mail and instruction links; "Show done" toggle and an
+open/done count.
+
+Tests: action sentences found (two in one mail), none without a limit;
+deadlines become tasks; junk mail sets none; own task added at top; empty
+refused; tick-off survives rebuild; removed mail task stays gone; drag order
+kept; rename; overdue flag; corrupt file.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).
+- Marks/grade tracker and CGPA simulator (requested, not started).
+- Friends' one-click setup.exe with the timetable-screenshot import (requested,
+  in progress: screenshot saved, box detection and reading still to build and
+  test on the CPU).
 - Old events were extracted before `details`/`link` existed and with the older
   prompt; re-extracting dates for stored mail would improve portions/links
   (model time on gemma3:4b) - not done yet.

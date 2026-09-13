@@ -583,6 +583,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             import user_notes
             return self._json(200, {"notes": user_notes.load()})
 
+        if path == "/api/todos":
+            import todo_store
+            return self._json(200, todo_store.build(load_store()["mails"],
+                                                    hidden_ids=hidden_mail_ids()))
+
         if path.startswith("/attachment/"):
             return self._serve_attachment(path)
 
@@ -638,7 +643,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path not in ("/api/report", "/api/important", "/api/ask",
                         "/api/notes", "/api/notes/delete",
-                        "/api/calendar/add", "/api/calendar/remove"):
+                        "/api/calendar/add", "/api/calendar/remove",
+                        "/api/todos/add", "/api/todos/update",
+                        "/api/todos/delete", "/api/todos/order"):
             return self._json(404, {"error": "not found"})
 
         try:
@@ -669,6 +676,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/notes/delete":
             import user_notes
             ok = user_notes.delete(str(payload.get("id") or ""))
+            return self._json(200 if ok else 404, {"ok": ok})
+
+        if path.startswith("/api/todos/"):
+            import todo_store
+            action = path[len("/api/todos/"):]
+            if action == "add":
+                item = todo_store.add(str(payload.get("text") or ""),
+                                      str(payload.get("due_date") or ""),
+                                      str(payload.get("due_time") or ""))
+                if not item:
+                    return self._json(400, {"error": "a task needs some text"})
+                return self._json(200, {"ok": True, "item": item})
+            if action == "order":
+                ids = payload.get("ids")
+                if not isinstance(ids, list):
+                    return self._json(400, {"error": "expected a list of ids"})
+                todo_store.reorder([str(i) for i in ids][:500])
+                return self._json(200, {"ok": True})
+            item_id = str(payload.get("id") or "")
+            if not item_id:
+                return self._json(400, {"error": "expected an id"})
+            if action == "update":
+                done, text = payload.get("done"), payload.get("text")
+                ok = todo_store.update(item_id,
+                                       done=None if done is None else bool(done),
+                                       text=None if text is None else str(text))
+                return self._json(200 if ok else 404, {"ok": ok})
+            ok = todo_store.delete(item_id)
             return self._json(200 if ok else 404, {"ok": ok})
 
         if path in ("/api/calendar/add", "/api/calendar/remove"):

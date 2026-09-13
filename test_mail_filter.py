@@ -1835,6 +1835,64 @@ check("nothing to say when there is no clash",
       conf_mod.describe(conf_mod.annotate([{"title": "x", "date": "2026-09-19",
                                            "start_time": "10:00"}])[0]) == "")
 
+# To-Do list (todo_store.py): your tasks plus the ones your mail sets you.
+import todo_store as todo_mod
+
+todo_mod.TODO_FILE = os.path.join(tempfile.mkdtemp(), "todos.json")
+cal_mod.OVERRIDES_FILE = os.path.join(tempfile.mkdtemp(), "calendar_overrides.json")
+_today = datetime(2026, 9, 14).date()
+_todo_mails = [
+    _dm("form", "Mentor feedback form", [], "Hello all. Please fill the Google form by 5 PM "
+        "today. Thanks. You should also upload your PPT before the tutorial on Friday.",
+        [], category="Other"),
+    _dm("asg", "Assignment 2", ["ECON F212"], "Assignment 2 is due on 25 September.",
+        [{"title": "Assignment 2 due", "date": "2026-09-25", "kind": "deadline"}]),
+    _dm("spam", "Big sale", [], "Submit your order by midnight for 50% off.", [],
+        category="Ignore"),
+]
+_acts = todo_mod.action_sentences(_todo_mails[0])
+check("an instruction with a time limit is found in mail",
+      any(a.startswith("Fill the Google form by 5 PM") for a in _acts), _acts)
+check("a second instruction in the same mail is found too",
+      any("upload your ppt before the tutorial" in a.lower() for a in _acts), _acts)
+check("a sentence with no limit is not a task",
+      not todo_mod.action_sentences({"body_text": "Please read the handout."}))
+_tl = todo_mod.build(_todo_mails, today=_today)
+_texts = [i["text"] for i in _tl["open"]]
+check("calendar deadlines become tasks", "Assignment 2 due" in _texts, _texts)
+check("filtered junk mail sets no tasks", not any("order by midnight" in t for t in _texts))
+_mine = todo_mod.add("Buy lab coat", due_date="2026-09-15")
+check("your own task is added, newest at the top",
+      todo_mod.build(_todo_mails, today=_today)["open"][0]["id"] == _mine["id"])
+check("an empty task is refused", todo_mod.add("   ") is None)
+_asg_task = next(i for i in todo_mod.build(_todo_mails, today=_today)["open"]
+                 if i["text"] == "Assignment 2 due")
+todo_mod.update(_asg_task["id"], done=True)
+_after = todo_mod.build(_todo_mails, today=_today)
+check("ticking a mail task off survives rebuilding the list from mail",
+      any(i["id"] == _asg_task["id"] for i in _after["done"])
+      and not any(i["id"] == _asg_task["id"] for i in _after["open"]))
+_form_task = next(i for i in _after["open"] if i["text"].startswith("Fill the Google form"))
+todo_mod.delete(_form_task["id"])
+check("a removed mail task does not come back",
+      not any(i["id"] == _form_task["id"] for i in
+              todo_mod.build(_todo_mails, today=_today)["open"]))
+_open_ids = [i["id"] for i in todo_mod.build(_todo_mails, today=_today)["open"]]
+todo_mod.reorder(list(reversed(_open_ids)))
+check("dragging the list into a new order is kept",
+      [i["id"] for i in todo_mod.build(_todo_mails, today=_today)["open"]]
+      == list(reversed(_open_ids)))
+todo_mod.update(_mine["id"], text="Buy a lab coat (size M)")
+check("a task can be renamed",
+      any(i["text"] == "Buy a lab coat (size M)" for i in
+          todo_mod.build(_todo_mails, today=_today)["open"]))
+check("a task due before today and not done is marked overdue",
+      any(i["overdue"] for i in todo_mod.build(
+          _todo_mails, today=datetime(2026, 9, 16).date())["open"] if i["id"] == _mine["id"]))
+open(todo_mod.TODO_FILE, "w", encoding="utf-8").write("{oops")
+check("a corrupt to-do file reads as empty, not a crash",
+      todo_mod.load() == {"items": [], "state": {}, "order": []})
+
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
                   encoding="utf-8").read()
