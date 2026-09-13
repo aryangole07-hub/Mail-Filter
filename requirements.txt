@@ -1,6 +1,8 @@
 google-auth
 google-auth-oauthlib
 google-api-python-client
+# Reading a timetable screenshot during setup (timetable_import.py)
+pillow
 # Reading attachments (attachments.py)
 openpyxl
 xlrd

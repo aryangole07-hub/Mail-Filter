@@ -240,15 +240,19 @@ are kept in `calendar_overrides.json` (gitignored).
 
 ## GPU safety
 
-The GPU that runs the models also drives the display, and filling its VRAM once
-made the monitor lose signal. Three guards now stop that:
+**Models run on the CPU only.** On the development machine, running a model on
+the AMD graphics card that also drives the display crashed the whole PC - twice,
+the second time with a small model using a fraction of the card's memory. So:
 
-- Ollama reserves 6 GB it will never use (`OLLAMA_GPU_OVERHEAD`) and keeps only
-  one model loaded (`OLLAMA_MAX_LOADED_MODELS=1`);
-- before loading a model, Mail Filter checks free VRAM and runs the model on
-  the CPU instead if the GPU cannot take it with
-  `MAIL_FILTER_VRAM_RESERVE_GB` (default 6) to spare - GPU first, CPU fallback;
-- the big chat model is opt-in only (`MAIL_FILTER_CHAT_MODEL`).
+- Mail Filter sends `num_gpu: 0` with every model request. A GPU is used only if
+  you set `MAIL_FILTER_ALLOW_GPU=1` deliberately, and even then a VRAM check
+  keeps `MAIL_FILTER_VRAM_RESERVE_GB` (default 6) free for the display.
+- On that machine Ollama is also prevented from seeing the GPU at all
+  (`HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES`/`GGML_VK_VISIBLE_DEVICES`/
+  `CUDA_VISIBLE_DEVICES=-1`) and its GPU backend folders are removed from
+  `lib\ollama`.
+
+CPU inference is slower, but it cannot take the display down.
 
 The server binds to `127.0.0.1`, so the site is reachable only from this
 computer. Your mail is never uploaded anywhere.

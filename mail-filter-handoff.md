@@ -559,6 +559,43 @@ suggestions; two same-day twins were left, and a third pass fixed them:
     `date_mentioned` now reads days listed before a month (",", "and", "&",
     "to", "-").
 
+### 2026-09-13 — second crash; local models locked to the CPU for good
+
+While probing the timetable-screenshot reader, the PC hard-crashed again
+(Kernel-Power 41 at 06:23, the second unexpected reboot that day after 05:15),
+and Windows came back with the RX 7900 XT disabled (code 22). Ollama's log shows
+the crash happened with **gemma3:4b using ~2.7 GB of 20 GB VRAM** (all 35
+layers plus the vision encoder on ROCm0). So the earlier conclusion was wrong:
+this is not VRAM exhaustion - the AMD ROCm compute path itself crashes this
+machine when the display card runs a model. VRAM reserves cannot prevent that.
+
+The user: "MAKE SURE IT NEVER HAPPENS AGAIN... NO MATTER WHAT." Policy now:
+**local models run on the CPU only**, enforced by four independent layers:
+1. **Ollama cannot see a GPU:** user environment `HIP_VISIBLE_DEVICES`,
+   `ROCR_VISIBLE_DEVICES`, `GGML_VK_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`
+   = -1 and `OLLAMA_LLM_LIBRARY=cpu`.
+2. **Ollama has no GPU code to load:** its backend folders `rocm_v7_1`,
+   `vulkan`, `cuda_v12`, `cuda_v13` were moved out of
+   `%LOCALAPPDATA%\Programs\Ollama\lib\ollama` into
+   `…\Ollama\gpu-backends-disabled\` (with a README saying why). An Ollama update
+   may reinstall them; layer 4 catches that.
+3. **Mail Filter always sends `num_gpu: 0`.** `OllamaClient.create` only runs
+   the VRAM placement guard when `MAIL_FILTER_ALLOW_GPU=1` is set on purpose;
+   otherwise every layer stays on the CPU even if Ollama could see the card.
+   Tests: every request carries `num_gpu: 0`; no `/api/ps` placement call by
+   default; the opt-in path still runs the VRAM guard.
+4. **Claude Code hook (`~/.claude/hooks/vram-guard.ps1`) rewritten:** denies any
+   Ollama/model/python command unless layers 1 and 2 are intact; denies any
+   command that would change those variables, move the backends back, set
+   `MAIL_FILTER_ALLOW_GPU`, or request GPU layers; still denies commands naming
+   large models. Pipe-tested 6/6 (big model deny, 27b deny, undo-variable deny,
+   move-backends-back deny, tests allow, small CPU model allow).
+
+The card was re-enabled (code 22 → 31) and fixed with an elevated
+`pnputil /restart-device` → OK. Cost of the policy: model calls are slower (CPU,
+32 GB RAM); the 26B chat model remains in the preference list but runs on the
+CPU. RoundTable shares this Ollama install, so it is CPU-only too.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).

@@ -719,9 +719,23 @@ st.create("gemma3:4b", 512, [{"role": "user", "content": "hi"}],
 _chat_calls = [p for p in st.sent if p[0] == "/api/chat"]
 path, payload = _chat_calls[0] if _chat_calls else st.sent[-1]
 check("chat goes to /api/chat", path == "/api/chat", path)
-# The VRAM guard looks at what is loaded before anything new is asked to load.
-check("free VRAM is checked before the model is asked to load",
-      [p[0] for p in st.sent][:1] == ["/api/ps"], [p[0] for p in st.sent])
+# CPU only, always: the PC hard-crashed twice when models ran on the display GPU.
+check("every model request keeps all layers off the GPU",
+      payload["options"].get("num_gpu") == 0, payload["options"])
+check("no GPU placement is even attempted by default",
+      "/api/ps" not in [p[0] for p in st.sent], [p[0] for p in st.sent])
+_saved_allow = os.environ.pop("MAIL_FILTER_ALLOW_GPU", None)
+try:
+    os.environ["MAIL_FILTER_ALLOW_GPU"] = "1"
+    st_gpu = StubOllama()
+    st_gpu.create("gemma3:4b", 16, [{"role": "user", "content": "hi"}])
+    check("the GPU can only be used on purpose, and then the VRAM guard still runs",
+          [p[0] for p in st_gpu.sent][:1] == ["/api/ps"]
+          and "num_gpu" not in [p for p in st_gpu.sent if p[0] == "/api/chat"][0][1]["options"])
+finally:
+    os.environ.pop("MAIL_FILTER_ALLOW_GPU", None)
+    if _saved_allow is not None:
+        os.environ["MAIL_FILTER_ALLOW_GPU"] = _saved_allow
 check("schema is passed to Ollama as `format`",
       payload["format"] == m.CLASSIFICATION_SCHEMA)
 check("streaming is off", payload["stream"] is False)

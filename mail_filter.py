@@ -1032,9 +1032,17 @@ class OllamaClient:
             # prompt over that is truncated from the start - losing the rules
             # rather than the mail.
             options["num_ctx"] = num_ctx
-        # GPU first, CPU when the GPU cannot take it without starving the
-        # display. See the VRAM guard section above.
-        options.update(self._placement_options(model, num_ctx))
+        # CPU ONLY, on every request. On 2026-09-13 the whole PC hard-crashed
+        # twice while a model ran on the RX 7900 XT that drives the display -
+        # the second time with gemma3:4b using 2.7 GB of 20 GB, so it was the
+        # AMD compute driver, not VRAM. num_gpu 0 keeps every layer off the GPU
+        # even if Ollama itself were somehow allowed to see the card again.
+        # A GPU can only be used by setting MAIL_FILTER_ALLOW_GPU=1 on purpose,
+        # and even then the VRAM guard above still applies.
+        if os.environ.get("MAIL_FILTER_ALLOW_GPU") == "1":
+            options.update(self._placement_options(model, num_ctx))
+        else:
+            options["num_gpu"] = 0
         payload = {
             "model": model,
             "messages": messages,
