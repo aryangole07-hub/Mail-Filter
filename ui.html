@@ -11,7 +11,7 @@
   --bg:#f6f7f9; --panel:#ffffff; --ink:#14161a; --muted:#6b7280;
   --line:#e6e8ec; --accent:#3b6df6; --accent-soft:#eaf0ff;
   --classes:#2f6df6; --fests:#c2410c; --other:#5b6472;
-  --danger:#b42318; --good:#0f7b4f; --warn:#b45309;
+  --danger:#b42318; --good:#0f7b4f; --warn:#b45309; --hss:#c2410c;
   --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px -12px rgba(16,24,40,.18);
   --radius:14px;
 }
@@ -20,7 +20,7 @@
     --bg:#0e1013; --panel:#16191e; --ink:#e8eaee; --muted:#98a1ae;
     --line:#262b33; --accent:#7aa2ff; --accent-soft:#1a2540;
     --classes:#7aa2ff; --fests:#fb923c; --other:#9aa4b2;
-    --danger:#f97066; --good:#4ade80; --warn:#fbbf24;
+    --danger:#f97066; --good:#4ade80; --warn:#fbbf24; --hss:#fb923c;
     --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -16px rgba(0,0,0,.7);
   }
 }
@@ -28,7 +28,7 @@
   --bg:#0e1013; --panel:#16191e; --ink:#e8eaee; --muted:#98a1ae;
   --line:#262b33; --accent:#7aa2ff; --accent-soft:#1a2540;
   --classes:#7aa2ff; --fests:#fb923c; --other:#9aa4b2;
-  --danger:#f97066; --good:#4ade80; --warn:#fbbf24;
+  --danger:#f97066; --good:#4ade80; --warn:#fbbf24; --hss:#fb923c;
   --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -16px rgba(0,0,0,.7);
 }
 *{box-sizing:border-box}
@@ -158,6 +158,9 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 .pill.mail{background:color-mix(in srgb,var(--fests) 20%,transparent);color:var(--fests);font-weight:600;}
 .pill.exam,.pill.deadline{background:color-mix(in srgb,var(--danger) 20%,transparent);
   color:var(--danger);font-weight:700;}
+/* Anything due from an HSS course is orange, not red - after the red rule so
+   it wins. Quizzes and exams in HSS courses stay red. */
+.pill.hss{background:color-mix(in srgb,var(--hss) 20%,transparent);color:var(--hss);font-weight:700;}
 .more{font-size:10px;color:var(--muted);padding-left:5px;}
 .daydetail{margin-top:16px}
 .evrow{display:flex;gap:12px;align-items:flex-start;padding:11px 13px;
@@ -204,6 +207,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 .kindtag{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
   margin-right:7px;padding:1px 6px;border-radius:5px;background:var(--accent-soft);color:var(--accent);}
 .kindtag.exam,.kindtag.deadline{background:color-mix(in srgb,var(--danger) 16%,transparent);color:var(--danger);}
+.kindtag.hss{background:color-mix(in srgb,var(--hss) 16%,transparent);color:var(--hss);}
 .evdetails{font-size:13px;margin-top:4px;line-height:1.5;}
 .evlinks,.evsrc{font-size:12px;color:var(--muted);margin-top:5px;display:flex;gap:6px;
   flex-wrap:wrap;align-items:center;}
@@ -338,6 +342,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     <div class="grid" id="calgrid" style="margin-top:6px"></div>
     <div class="legend">
       <span><i style="background:color-mix(in srgb,var(--danger) 55%,transparent)"></i>Quiz, exam or something due</span>
+      <span><i style="background:color-mix(in srgb,var(--hss) 55%,transparent)"></i>Due for an HSS course</span>
       <span><i style="background:color-mix(in srgb,var(--fests) 55%,transparent)"></i>Something you added</span>
     </div>
     <div class="daydetail" id="daydetail"></div>
@@ -568,7 +573,7 @@ function renderCal(){
     const list=(byDay[s]||[]);
     for(const e of list.slice(0,3)){
       const p=document.createElement("div");
-      p.className="pill "+(["exam","deadline"].includes(e.kind)?e.kind:"mail");
+      p.className="pill "+(isHssDue(e)?"hss":["exam","deadline"].includes(e.kind)?e.kind:"mail");
       p.textContent=(e.start_time?e.start_time+" ":"")+e.title;
       p.title=e.title; cell.appendChild(p);
     }
@@ -584,6 +589,8 @@ function renderCal(){
    portions) and things due (with where the instructions are and the mail they
    came from). Everything else found in mail is listed under it with Add to
    cal; anything on it can be taken off. */
+/* Due for an HSS course (HSS F352, HSS F222, ...): shown orange, not red. */
+function isHssDue(e){ return e.kind==="deadline" && (e.courses||[]).some(c=>/^HSS\b/i.test(c)); }
 function kindLabel(k){ return k==="exam"?"Quiz / exam":k==="deadline"?"Due":"Event"; }
 function shortUrl(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return u; } }
 function evRow(e,onCal,timeLabel){
@@ -593,7 +600,7 @@ function evRow(e,onCal,timeLabel){
   return `<div class="evrow">
     <div class="evtime">${esc(timeLabel||e.start_time||"—")}</div>
     <div class="evbody">
-      <div class="evtitle"><span class="kindtag ${esc(e.kind)}">${kindLabel(e.kind)}</span>${esc(e.title)}</div>
+      <div class="evtitle"><span class="kindtag ${esc(e.kind)}${isHssDue(e)?" hss":""}">${kindLabel(e.kind)}</span>${esc(e.title)}</div>
       ${meta?`<div class="evmeta">${esc(meta)}</div>`:""}
       ${e.details?`<div class="evdetails">${esc(e.details)}</div>`:""}
       ${links?`<div class="evlinks">Instructions: ${links}</div>`:""}

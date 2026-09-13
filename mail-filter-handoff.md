@@ -469,6 +469,21 @@ must-not-miss entries, 86 suggestions and no timetabled classes.
   them needs OCR (e.g. Tesseract, a separate large install) - not added without
   the user's say-so; they are still stored and downloadable.
 
+### 2026-09-13 — HSS deadlines in orange
+
+The student asked for "anything from any HSS course that's due" to be orange,
+not red, on the calendar.
+- `ui.html`: `isHssDue(e)` is true for a `deadline` whose mail is tagged with an
+  `HSS …` course code (currently HSS F352 TWS and HSS F222 Linguistics). Such
+  entries get the `hss` class on the day pill and on the "Due" tag in the day
+  detail and suggestions list; the rules sit after the red exam/deadline rules
+  so they win. New colour token `--hss`: `#c2410c` in the light theme,
+  `#fb923c` in both dark-theme blocks. Legend: "Due for an HSS course".
+- Deliberately unchanged: quizzes/exams in HSS courses stay red ("due" read as
+  deadlines), and deadlines from every other course stay red.
+- Tests cover the selector, the class, rule order, all three theme tokens, the
+  legend, and that the registry's HSS codes are the two expected.
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).

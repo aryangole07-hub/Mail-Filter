@@ -1599,6 +1599,22 @@ _ev_ok = ev.validate_event({"title": "Quiz", "date": "2026-09-16", "kind": "exam
                            datetime(2026, 9, 10, tzinfo=timezone.utc))
 check("a link that is not http(s) is dropped", _ev_ok["link"] == "" and _ev_ok["details"] == "Ch 3-5")
 
+# Anything due from an HSS course is orange, not red (the student's choice).
+_ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),
+                  encoding="utf-8").read()
+check("HSS deadlines are picked out by course code",
+      'e.kind==="deadline" && (e.courses||[]).some(c=>/^HSS\\b/i.test(c))' in _ui_cal)
+check("the day pill for an HSS deadline uses the orange class",
+      'isHssDue(e)?"hss"' in _ui_cal and ".pill.hss{" in _ui_cal)
+check("the orange rule comes after the red one, so it wins",
+      _ui_cal.index(".pill.hss{") > _ui_cal.index(".pill.exam,.pill.deadline{")
+      and _ui_cal.index(".kindtag.hss{") > _ui_cal.index(".kindtag.exam,.kindtag.deadline{"))
+check("orange is defined for light and both dark themes",
+      _ui_cal.count("--hss:") == 3)
+check("the legend explains the orange", "Due for an HSS course" in _ui_cal)
+check("HSS courses really are the HSS-coded ones in the registry",
+      {c["code"] for c in co.COURSES if c["code"].startswith("HSS")} == {"HSS F352", "HSS F222"})
+
 
 section("Faster refresh - summaries run a few at a time")
 
