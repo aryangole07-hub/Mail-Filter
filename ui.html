@@ -605,6 +605,7 @@ function evRow(e,onCal,timeLabel){
       ${e.details?`<div class="evdetails">${esc(e.details)}</div>`:""}
       ${links?`<div class="evlinks">Instructions: ${links}</div>`:""}
       ${srcs?`<div class="evsrc">From: ${srcs}</div>`:""}
+      ${(e.other_dates||[]).length?`<div class="evmeta">Also mentioned for ${esc(e.other_dates.map(x=>new Date(x+"T00:00:00").toLocaleDateString(undefined,{day:"numeric",month:"short"})).join(", "))} - shown once, on the date the mail gives</div>`:""}
     </div>
     <button class="btn ${onCal?"ghost":"good"} small" data-cal="${onCal?"remove":"add"}"
       data-keys="${esc(JSON.stringify(e.keys||[]))}">${onCal?"Remove from cal":"Add to cal"}</button>

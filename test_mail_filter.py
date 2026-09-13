@@ -1540,11 +1540,16 @@ _hack_ev = {"title": "Hackathon registration closes", "date": "2026-09-20",
             "kind": "deadline", "details": "", "link": ""}
 _talk_ev = {"title": "Guest talk", "date": "2026-09-18", "kind": "event",
             "details": "", "link": ""}
+# Each mail states its date, as a real announcement does: nothing goes on the
+# calendar by itself on a date the mail never gives.
 _cal_mails = [
-    _cal_mail("q", "Classes", [_quiz_ev]),
+    _cal_mail("q", "Classes", [_quiz_ev],
+              body="FoFA Quiz 2 will be held on 16 September at 18:15."),
     _cal_mail("a1", "Classes", [_asg_ev],
-              body="Instructions: https://classroom.google.com/c/abc"),
-    _cal_mail("a2", "Classes", [_asg_again]),
+              body="Assignment 2 is due on 25 September. "
+                   "Instructions: https://classroom.google.com/c/abc"),
+    _cal_mail("a2", "Classes", [_asg_again],
+              body="Reminder: submit Assignment 2 by 25/09."),
     _cal_mail("h", "Fests", [_hack_ev]),
     _cal_mail("t", "Other", [_talk_ev],
               html_body='<a href="https://drive.google.com/file/d/x">slides</a>'
@@ -1598,6 +1603,165 @@ _ev_ok = ev.validate_event({"title": "Quiz", "date": "2026-09-16", "kind": "exam
                             "details": "Ch 3-5", "link": "javascript:alert(1)"},
                            datetime(2026, 9, 10, tzinfo=timezone.utc))
 check("a link that is not http(s) is dropped", _ev_ok["link"] == "" and _ev_ok["details"] == "Ch 3-5")
+
+# Nothing counted twice - every case below is one found in the real calendar.
+cal_mod.OVERRIDES_FILE = os.path.join(tempfile.mkdtemp(), "calendar_overrides.json")
+
+
+def _dm(mid, subject, courses_, body, events, category="Classes",
+        received="2026-09-10T00:00:00+00:00"):
+    return {"id": mid, "subject": subject, "category": category, "courses": courses_,
+            "received_at": received, "body_text": body, "events": events}
+
+
+_dup_mails = [
+    # A "marks not showing" thread, read as the quiz and dated with the thread.
+    _dm("m1", "Re: Quiz marks not showing up in the marksheet", ["ECON F214"],
+        "My FoFA quiz 1 marks are not visible.",
+        [{"title": "FoFA Quiz 1", "date": "2026-09-01", "kind": "exam"},
+         {"title": "FoFA Quiz", "date": "2026-09-01", "kind": "exam"}],
+        received="2026-09-02T00:00:00+00:00"),
+    _dm("m2", "Regarding FOFA Quiz-1", ["ECON F212"],
+        "FOFA Quiz-1 will be held on 16th September, 6:15 pm.",
+        [{"title": "FOFA Quiz-1", "date": "2026-09-16", "start_time": "18:15",
+          "kind": "exam"}]),
+    _dm("m3", "New announcement", ["ECON F213"],
+        "We will have our second quiz tomorrow.",
+        [{"title": "Second Quiz", "date": "2026-09-12", "kind": "exam"}],
+        received="2026-09-11T00:00:00+00:00"),
+    _dm("m4", "Procedure for outstation leave", [],
+        "Submit the outstation leave form by 11 September.",
+        [{"title": "Outstation Leave or Overnight Stay Permission",
+          "date": "2026-09-11", "kind": "deadline"},
+         {"title": "Outstation Leave / Overnight Stay Permission",
+          "date": "2026-09-11", "kind": "deadline"}], category="Other"),
+    _dm("m5", "Library membership", [], "Books can be renewed from 11 September.",
+        [{"title": "Renewal facility", "date": "2026-09-11", "kind": "deadline"}],
+        category="Other"),
+    _dm("m6", "Campus merch drop", [], "New Pilani Polo on sale from 11 September.",
+        [{"title": "Pilani Polo", "date": "2026-09-11", "kind": "exam"}],
+        category="Other"),
+    _dm("m7", "Quiz 2 paper distribution", ["ECON F214"],
+        "Papers will be distributed on 3 September.",
+        [{"title": "Quiz 2 paper distribution", "date": "2026-09-03", "kind": "exam"}]),
+    _dm("m8", "Your assigned Sl. No. for POE", ["ECON F211"],
+        "Your serial number for exit tests, midsem and comprehensive exams is 42.",
+        [{"title": "Mid-Semester Examinations", "date": "2026-09-11", "kind": "exam"}]),
+    _dm("m9", "EEB quiz 1", ["ECON F214"], "EEB Quiz 1 is on 16 September.",
+        [{"title": "EEB Quiz 1", "date": "2026-09-16", "kind": "exam"}]),
+    _dm("m10", "Assignment", ["HSS F352"], "Assignment presentation on 25/09.",
+        [{"title": "Assignment presentation", "date": "2026-09-25", "kind": "deadline"},
+         {"title": "Assignment", "date": "2026-09-25", "kind": "deadline"}]),
+]
+_don, _doff = cal_mod.build(_dup_mails, _from, _to)
+_dall = _don + _doff
+_fofa = [e for e in _dall if e["courses"] == ["ECON F212"]]
+check("one quiz in three mails on three dates is one entry",
+      len(_fofa) == 1, [(e["title"], e["date"]) for e in _fofa])
+check("it keeps the date the mail announces, with its time",
+      _fofa and (_fofa[0]["date"], _fofa[0]["start_time"]) == ("2026-09-16", "18:15"))
+check("and it lists every mail that mentioned it", _fofa and len(_fofa[0]["sources"]) == 2)
+check("the wrong dates are remembered, never shown as entries",
+      _fofa and _fofa[0]["other_dates"] == ["2026-09-01"])
+check("two courses' Quiz 1 on the same day stay two entries",
+      len([e for e in _don if e["date"] == "2026-09-16"]) == 2)
+check("'second quiz tomorrow' is grounded by 'tomorrow' and goes on",
+      "Second Quiz" in [e["title"] for e in _don])
+check("two wordings of one deadline on one day are one entry",
+      len([e for e in _dall if "outstation" in e["title"].lower()]) == 1)
+check("'Assignment' and 'Assignment presentation' on one day are one entry",
+      len([e for e in _dall if e["courses"] == ["HSS F352"]]) == 1)
+check("a library facility is not a deadline on the calendar",
+      "Renewal facility" not in [e["title"] for e in _don])
+check("merchandise is not an exam on the calendar",
+      "Pilani Polo" not in [e["title"] for e in _don])
+check("a paper distribution is not an exam on the calendar",
+      "Quiz 2 paper distribution" not in [e["title"] for e in _don])
+check("an exam whose date the mail never gives is offered, not imposed",
+      "Mid-Semester Examinations" in [e["title"] for e in _doff])
+_dkeys = [k for e in _dall for k in e["keys"]]
+check("no mention is shown twice anywhere", len(_dkeys) == len(set(_dkeys)))
+cal_mod.set_on_calendar(_fofa[0]["keys"], False)
+check("removing a merged entry removes every mention of it",
+      not [e for e in cal_mod.build(_dup_mails, _from, _to)[0] if e["courses"] == ["ECON F212"]])
+check("a quiz whose real date is next month is not left behind in this one",
+      not [e for e in cal_mod.build(_dup_mails, _from, datetime(2026, 9, 10).date())[0]
+           + cal_mod.build(_dup_mails, _from, datetime(2026, 9, 10).date())[1]
+           if e["courses"] == ["ECON F212"]])
+check("quiz numbering is read in every common spelling",
+      [cal_mod.numbered(t) for t in ("FOFA Quiz-1", "Quiz 1", "first quiz", "Quiz I", "quiz #2")]
+      == [("quiz", "1")] * 4 + [("quiz", "2")])
+check("a course is recognised by its short form, name or code",
+      {cal_mod.course_in_title(t) for t in ("FoFA quiz", "ECON F212 quiz",
+       "Fundamentals of Finance and Accounting quiz")} == {"ECON F212"})
+check("two-letter course forms are not trusted in titles",
+      cal_mod.course_in_title("TS DE presentation") == "")
+check("dates are found however the mail writes them",
+      all(cal_mod.date_mentioned(t, "2026-09-16") for t in
+          ("on 16th September", "Sept 16", "16/09/2026", "2026-09-16", "16-9"))
+      and not cal_mod.date_mentioned("on 6th September", "2026-09-16"))
+
+# Second pass, also from the real calendar.
+_more = [
+    # The same tutorial labelled "meeting" in one mail and "other" in another.
+    _dm("t1", "[LMS] MATH F201: Tut 6", ["MATH F201"], "Tut 6 on 8 September.",
+        [{"title": "Tut - 6", "date": "2026-09-08", "kind": "meeting"}]),
+    _dm("t2", "[LMS] MATH F211: Tut 6", ["MATH F201"], "Tut 6 on 8 September.",
+        [{"title": "Tut 6", "date": "2026-09-08", "kind": "other"}]),
+    # A paper collection misdated with the mail's own date in a reply.
+    _dm("p1", "Quiz 1 paper collection", ["ECON F213"],
+        "Collect your quiz 1 papers on 11 September.",
+        [{"title": "Quiz 1 paper collection", "date": "2026-09-11", "kind": "other"}]),
+    _dm("p2", "Re: Quiz 1 paper collection", ["ECON F213"], "Can I come later?",
+        [{"title": "Quiz 1 paper collection", "date": "2026-08-31", "kind": "other"}]),
+    # A real schedule: every date is written in the mail, so each one stays.
+    _dm("s1", "Assignment presentations", ["HSS F352"],
+        "Presentations are on 21 September and 23 September.",
+        [{"title": "Assignment presentation", "date": "2026-09-21", "kind": "deadline"},
+         {"title": "Assignment presentation", "date": "2026-09-23", "kind": "deadline"}]),
+    # Two unrelated generic registrations.
+    _dm("r1", "Soldierathon", [], "Registration closes 27 September.",
+        [{"title": "Registration", "date": "2026-09-27", "kind": "event"}], category="Other"),
+    _dm("r2", "Nature Club", [], "Registration closes 28 September.",
+        [{"title": "Registration", "date": "2026-09-28", "kind": "event"}], category="Other"),
+]
+_mon, _moff = cal_mod.build(_more, _from, _to)
+_mall = _mon + _moff
+check("one tutorial with two different labels on one day is one entry",
+      len([e for e in _mall if "tut" in e["title"].lower()]) == 1)
+_pc = [e for e in _mall if "paper collection" in e["title"].lower()]
+check("a mention on a date no mail gives is folded into the date that is given",
+      len(_pc) == 1 and _pc[0]["date"] == "2026-09-11" and _pc[0]["other_dates"] == ["2026-08-31"],
+      [(e["date"], e["other_dates"]) for e in _pc])
+check("a real schedule with every date written keeps each date",
+      [e["date"] for e in _mall if "presentation" in e["title"].lower()]
+      == ["2026-09-21", "2026-09-23"])
+check("two unrelated 'Registration' entries from different mails stay two",
+      len([e for e in _mall if e["title"] == "Registration"]) == 2)
+_mkeys = [k for e in _mall for k in e["keys"]]
+check("still no mention shown twice", len(_mkeys) == len(set(_mkeys)))
+check("the page says when other dates were folded into an entry",
+      "Also mentioned for" in _ui_cal if "_ui_cal" in dir() else "Also mentioned for" in io.open(
+          os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"), encoding="utf-8").read())
+
+# Third pass: the last two leftovers in the real calendar.
+check("a day in a list of dates counts as written in the mail",
+      all(cal_mod.date_mentioned("Presentations on 21st, 23rd and 25th September", d)
+          for d in ("2026-09-21", "2026-09-23", "2026-09-25"))
+      and not cal_mod.date_mentioned("Presentations on 21st, 23rd and 25th September",
+                                     "2026-09-22"))
+_kinds = [
+    _dm("f1", "Face Scan Registration", [], "Face scan registration on 7 September.",
+        [{"title": "Face Scan Registration", "date": "2026-09-07", "kind": "deadline"}],
+        category="Other"),
+    _dm("f2", "Re: Face Scan Registration", [], "Is it on 7 September?",
+        [{"title": "Face Scan Registration", "date": "2026-09-07", "kind": "meeting"}],
+        category="Other"),
+]
+_kon, _koff = cal_mod.build(_kinds, _from, _to)
+check("one thing labelled deadline in one mail and meeting in another is one entry",
+      len(_kon + _koff) == 1 and (_kon + _koff)[0]["kind"] == "deadline",
+      [(e["title"], e["kind"]) for e in _kon + _koff])
 
 # Anything due from an HSS course is orange, not red (the student's choice).
 _ui_cal = io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"),

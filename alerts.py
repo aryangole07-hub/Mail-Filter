@@ -53,20 +53,29 @@ def hidden_ids():
 
 
 def mail_events_on(target):
-    """Dated things from mail, for one calendar date."""
+    """Dated things from mail on one calendar date, each real thing once.
+
+    Merged exactly as the calendar merges them (calendar_store), so a quiz
+    mentioned in its announcement and in two reminders is one line in the
+    evening reminder, not three - and a mention that carried the wrong date
+    does not add a phantom one. Anything the student took off the calendar is
+    left out of the reminder too.
+    """
+    import calendar_store
+
     store = _load(STORE_FILE, {"mails": []})
-    skip = hidden_ids()
+    mails = [m for m in store.get("mails", []) if isinstance(m, dict)]
+    skip = hidden_ids() | {m.get("id") for m in mails
+                           if m.get("category") == "Ignore" and not m.get("absolute")}
+    removed = set(calendar_store.load_overrides()["removed"])
+    on, off = calendar_store.build(mails, target, target, hidden_ids=skip)
+
     found = []
-    for mail in store.get("mails", []):
-        if not isinstance(mail, dict) or mail.get("id") in skip:
-            continue
-        if mail.get("category") == "Ignore" and not mail.get("absolute"):
-            continue
-        for event in events_mod.on_calendar_date(mail.get("events") or [], target):
-            entry = dict(event)
-            entry["mail_subject"] = mail.get("subject", "")
-            entry["source"] = "mail"
-            found.append(entry)
+    for entry in on + [e for e in off if not any(k in removed for k in e["keys"])]:
+        item = dict(entry)
+        item["source"] = "mail"
+        found.append(item)
+    found.sort(key=lambda e: e.get("start_time") or "99:99")
     return found
 
 

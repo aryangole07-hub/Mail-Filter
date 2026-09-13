@@ -484,9 +484,87 @@ not red, on the calendar.
 - Tests cover the selector, the class, rule order, all three theme tokens, the
   legend, and that the registry's HSS codes are the two expected.
 
+### 2026-09-13 — nothing counted twice on the calendar
+
+The student asked to make sure no event, quiz, exam or due date is counted
+twice. Listing every same-day group in the live calendar showed it was worse
+than wording differences:
+- the FoFA Quiz 1 appeared **four times** (31 Aug, 1 Sep, 2 Sep, 16 Sep) - a
+  "quiz marks not showing" reply thread had been read as the quiz, dated with
+  the thread's own dates; the real date is 16 Sep 18:15;
+- same-day twins: "FoFA Quiz 1" + "FoFA Quiz"; "Outstation Leave or Overnight
+  Stay Permission" + "Outstation Leave / Overnight Stay Permission";
+- non-events on the calendar as exams/deadlines: a polo shirt, a cap, a
+  library book display, the mediclaim policy, "Quiz 2 paper distribution",
+  library facilities ("Renewal facility"), and midsem/compre dated 11 Sep from
+  a mail that gives no dates at all.
+
+`calendar_store.py` was rebuilt:
+1. **Merging by what a thing is.** A mention's course comes from its title
+   (code, name, aka, short forms - "FoFA", "ECON F212", "Fundamentals of
+   Finance…" are one course; two-letter forms like "DE"/"TS" are ignored as too
+   ambiguous), else from the mail if it has exactly one course. Course + quiz /
+   test / assignment / tutorial / project number ("Quiz-1", "Quiz 1", "first
+   quiz", "Quiz I") is one identity across **all dates**; midsem and compre are
+   once per course. Mentions without an identity merge with a same-day,
+   same-kind, same-course mention whose title tokens overlap ≥60 % or contain
+   one another (course names, numbering and words like reminder/due/re/fwd are
+   normalised away).
+2. **Which date wins.** The date written in the mail (+3), a relative phrase
+   such as "tomorrow" (+1), a start time (+2), details (+1), then the most
+   recently received mail (so a postponement wins). Start/end/location come only
+   from mentions on the winning date. Every source mail is listed; the other
+   dates are kept in `other_dates` but never shown as entries.
+3. **Only grounded, genuine items go on automatically.** `validated_kind()`: an
+   exam needs exam wording and no paperwork/marks/serial-number wording; a
+   deadline needs submit/pay/register-type wording (title or details); otherwise
+   the kind becomes "other". The event's date must appear in the mail (day +
+   month name, dd/mm, yyyy-mm-dd; subject, text, HTML and attachment text are
+   searched) or the mail must use relative wording. Failing items are still
+   offered under the month with Add to cal.
+4. Merging happens across all stored mail **before** the month range is
+   applied, so a wrong-dated mention cannot survive because the real date is in
+   another month. Add/Remove act on every key of a merged entry.
+5. `alerts.py` evening reminder now uses the same merged entries (minus anything
+   removed from the calendar), so one quiz is one line there too.
+
+Result on the real store (Aug–Dec): **59 → 12** entries on the calendar; the
+FoFA Quiz 1 is one entry on 16 Sep 18:15 with four source mails and three
+misread dates recorded; Assignment I (MATH F201) is one entry on 15 Sep 17:00.
+
+A second pass fixed the leftovers that listing showed:
+6. **Kinds only have to agree for exams and deadlines.** "Tut - 6" labelled
+   "meeting" in one mail and "other" in another, and "Class participation"
+   three times a day, were kept apart only by the model's inconsistent labels.
+7. **Folding across dates (`_fold_across_dates`).** Same-titled mentions on
+   different dates (token overlap ≥80 %, same course, compatible kind; titles
+   shorter than three tokens only within one mail or one thread, so two
+   unrelated "Registration"s stay apart): every date that is *written* in a
+   mail stays its own entry - real schedules such as presentations on the 21st,
+   23rd and 25th or a vaccination running 13–18 Sep survive - and mentions on
+   dates no mail writes are folded into the nearest written one. If no date in
+   the cluster is written anywhere, it becomes one entry.
+8. The page shows folded dates on the entry: "Also mentioned for 31 Aug – shown
+   once, on the date the mail gives".
+
+After the second pass the real calendar showed **8** entries and 130
+suggestions; two same-day twins were left, and a third pass fixed them:
+9. **Same day, same wording, different label.** "Face Scan Registration" and
+   "Assignment presentation" each appeared once as a deadline (on the calendar)
+   and once as a meeting (suggested). Same-day mentions now merge across kinds
+   when their wording is near-identical (≥80 % token overlap); the merged entry
+   takes the most important kind (exam > deadline > other).
+10. **Date lists.** "Presentations on 21st, 23rd and 25th September" only
+    counted the 25th as written, so the 21st and 23rd were folded away.
+    `date_mentioned` now reads days listed before a month (",", "and", "&",
+    "to", "-").
+
 ### Still to do (as of this entry)
 - Verify a real seating sheet end to end when one arrives.
 - OCR for scanned PDFs, if the user wants it (needs a separate install).
+- Old events were extracted before `details`/`link` existed and with the older
+  prompt; re-extracting dates for stored mail would improve portions/links
+  (model time on gemma3:4b) - not done yet.
 - Any stack change for very-low-VRAM machines (the user's "repo that shrinks
   Gemma") is on hold: when asked which repo, the user named the Mail Filter repo;
   no quantisation project has been chosen.
