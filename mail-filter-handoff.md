@@ -980,3 +980,8 @@ Prompt: add a friend's BITS email to the Google OAuth test users.
   `bubbly-card-508320-m3` in the browser; the user adds the address under
   **Test users → Add users → Save**.
 - Test users are capped at 100 while the app is in Testing.
+
+- Checked: the OAuth app is **In production**, External, unverified, user cap
+  1/100. No test users are needed - any Google account can sign in after the
+  "Google hasn't verified this app" → Advanced → Go to Mail Filter screen,
+  up to 100 users over the project's lifetime (each friend uses one slot).
