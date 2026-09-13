@@ -126,40 +126,50 @@ def compose(target, from_mail, from_timetable, today=None):
     return title, "\n".join(lines)
 
 
+NOTIFY_SCRIPT = os.path.join(SCRIPT_DIR, "notify.ps1")
+
+
 def notify(title, body):
-    """Show a Windows notification. Returns True if it was displayed."""
+    """Show a Windows notification. Returns True if it was displayed.
+
+    The reminder is only useful if it is still there when the student next
+    looks at the screen, so notify.ps1 sends a "reminder" toast, which stays
+    up until it is clicked away. It falls back to a fading tray balloon by
+    itself on a machine where the toast platform is unavailable (exit 2).
+    """
     if os.name != "nt":
         print(title)
         print(body)
         return True
 
-    # A tray balloon needs no third-party module and no install step, which
-    # matters because this has to work on a friend's machine straight after
-    # setup.exe with nothing else added.
-    script = r"""
-param([string]$Title, [string]$Body)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$n = New-Object System.Windows.Forms.NotifyIcon
-$n.Icon = [System.Drawing.SystemIcons]::Information
-$n.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-$n.BalloonTipTitle = $Title
-$n.BalloonTipText = $Body
-$n.Visible = $true
-$n.ShowBalloonTip(20000)
-Start-Sleep -Seconds 12
-$n.Dispose()
-"""
+    if not os.path.exists(NOTIFY_SCRIPT):
+        print("Could not show a notification (notify.ps1 is missing).",
+              file=sys.stderr)
+        return False
+
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-Command", script, "-Title", title, "-Body", body],
-            capture_output=True, text=True, timeout=60,
+             "-File", NOTIFY_SCRIPT, "-Title", title, "-Body", body],
+            capture_output=True, text=True, timeout=120,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return True
     except Exception as exc:  # noqa: BLE001 - a failed popup must not crash the task
         print("Could not show a notification ({}).".format(exc), file=sys.stderr)
         return False
+
+    if result.returncode == 0:
+        return True
+    if result.returncode == 2:
+        # Shown, but it will fade. Worth saying so: the whole point of the
+        # reminder is that it waits for the student.
+        print("Showed a fading balloon - the sticky toast was unavailable.",
+              file=sys.stderr)
+        return True
+
+    print("Could not show a notification.", file=sys.stderr)
+    if result.stderr:
+        print(result.stderr.strip()[:500], file=sys.stderr)
+    return False
 
 
 def already_sent(key):

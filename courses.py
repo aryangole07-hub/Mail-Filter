@@ -313,3 +313,45 @@ def classes_between(start, end):
         out.extend(classes_on(day))
         day += timedelta(days=1)
     return out
+
+
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+             "Saturday", "Sunday"]
+
+
+def timetable_block(today=None):
+    """The weekly timetable as prose, for the chat prompt.
+
+    The chat is asked "when is my next lecture" and "who takes my tutorial",
+    and neither is in any email - it is in here. Written out day by day with
+    the room and who takes the slot, and with today named so "next" means
+    something.
+    """
+    lines = []
+    if today is not None:
+        if isinstance(today, datetime):
+            today = today.date()
+        lines.append("Today is {} ({}).".format(
+            today.strftime("%d %b %Y"), DAY_NAMES[today.weekday()]))
+        if not (TERM_START <= today <= TERM_END):
+            lines.append("This date is outside the semester, so the weekly "
+                         "timetable below is not running.")
+
+    for day in range(5):
+        slots = [s for s in WEEKLY if s["day"] == day]
+        if not slots:
+            continue
+        slots.sort(key=lambda s: s["start"])
+        rendered = []
+        for slot in slots:
+            profs = SLOT_PROFS.get((slot["code"], slot["type"]), [])
+            rendered.append("{}-{} {} {} {} ({}){}".format(
+                slot["start"], slot["end"], course_label(slot["code"]),
+                slot["code"], slot["type"], slot["room"],
+                " with " + ", ".join(profs) if profs else ""))
+        lines.append("- {}: {}".format(DAY_NAMES[day], "; ".join(rendered)))
+
+    if not lines:
+        return ""
+    return ("Your weekly timetable (every week of the semester, not a one-off):\n"
+            + "\n".join(lines))

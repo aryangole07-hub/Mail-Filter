@@ -28,7 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Everything the installed app needs at runtime.
 PAYLOAD = [
     "mail_filter.py", "viewer.py", "courses.py", "events.py", "qa.py",
-    "alerts.py", "run_alert.ps1",
+    "alerts.py", "run_alert.ps1", "notify.ps1",
+    "run_viewer.ps1", "install_autostart.ps1",
     "ui.html", "check_account.py", "run_digest.ps1", "view.ps1",
     "requirements.txt", "README.md",
 ]

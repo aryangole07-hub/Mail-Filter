@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mail Filter</title>
+<!-- Inline, so the app window gets a taskbar icon with no extra request. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233b6df6'/%3E%3Crect x='14' y='20' width='36' height='25' rx='3' fill='%23ffffff'/%3E%3Cpath d='M14 22l18 13 18-13' fill='none' stroke='%233b6df6' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg:#f6f7f9; --panel:#ffffff; --ink:#14161a; --muted:#6b7280;
@@ -171,7 +173,27 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;
   margin-right:5px;vertical-align:-1px;}
 
-/* ask */
+/* ask - a conversation, so it reads bottom-up like one */
+.chat{display:flex;flex-direction:column;gap:14px;margin-bottom:14px;padding:4px 2px 8px;
+  max-height:min(58vh,560px);overflow-y:auto;overscroll-behavior:contain;}
+.turn{display:flex;flex-direction:column;gap:7px;max-width:min(660px,88%);}
+.turn.me{align-self:flex-end;align-items:flex-end;}
+.turn.ai{align-self:flex-start;}
+.chat .turn:last-child{animation:rise .3s ease backwards;}
+.bub{padding:12px 15px;border-radius:16px;font-size:14.5px;line-height:1.6;
+  white-space:pre-wrap;word-wrap:break-word;}
+.bub.me{background:var(--accent);color:#fff;border-bottom-right-radius:5px;}
+.bub.ai{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);
+  border-bottom-left-radius:5px;}
+.bub.ai.notfound{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));}
+.turn .srctitle{margin:2px 0 4px;}
+.starters{display:flex;flex-direction:column;gap:10px;padding:18px 4px;}
+.starters .lead{font-size:14px;color:var(--muted);line-height:1.6;}
+.starters .row{display:flex;gap:8px;flex-wrap:wrap;}
+.starter{background:var(--panel);border:1px solid var(--line);color:var(--ink);
+  border-radius:999px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer;
+  transition:all .15s ease;}
+.starter:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px);}
 .askbox{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
 .askbox input{flex:1 1 300px;background:var(--panel);border:1px solid var(--line);
   color:var(--ink);border-radius:11px;padding:12px 14px;font:inherit;font-size:14.5px;}
@@ -240,7 +262,7 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
     </div>
     <div class="spacer"></div>
     <button class="iconbtn" id="theme" title="Toggle light / dark">◐</button>
-    <button class="iconbtn" id="refresh" title="Reload now">⟳</button>
+    <button class="iconbtn" id="refresh" title="Check Gmail for new mail">⟳</button>
   </header>
 
   <nav class="views">
@@ -299,11 +321,12 @@ nav.views button[aria-selected="true"]:hover{color:var(--accent)}
 
   <!-- ASK -->
   <section id="v-ask" class="hidden">
+    <div class="chat" id="chat"></div>
     <div class="askbox">
-      <input id="qq" placeholder="When is my FoFA quiz? What did Ufaque Paiker send?" autocomplete="off">
-      <button class="btn primary" id="askbtn">Ask</button>
+      <input id="qq" placeholder="Ask about your mail — follow-ups work too" autocomplete="off">
+      <button class="btn primary" id="askbtn">Send</button>
+      <button class="btn ghost" id="newchat" title="Start a new conversation">New chat</button>
     </div>
-    <div id="askout"></div>
   </section>
 </div>
 
@@ -410,7 +433,17 @@ function card(m,i){
     ? `<span class="badge shield" title="Kept visible because ${esc(m.rescue_reason)}">shielded</span>` : "";
   const evs=(m.events||[]).length
     ? `<span class="badge ev">${m.events.length} date${m.events.length>1?"s":""}</span>` : "";
+  // One action per card, and it is the one that makes sense for where the
+  // card is. Mail that is being shown can be pushed down; mail that is hidden
+  // can be pulled up. Offering both on every card asked you to work out which
+  // of two similar-sounding buttons applied to what you were looking at.
+  const filtered = isFiltered(m);
   const reportDisabled = m.absolute && !m.marked_important;
+  const action = filtered
+    ? `<button class="btn good" data-a="imp">Mark important</button>`
+    : m.marked_important
+    ? `<button class="btn good" data-a="imp">Unmark important</button>`
+    : `<button class="btn ghost" data-a="rep"${reportDisabled?' disabled title="This can never be hidden"':""}>Mark unimportant</button>`;
   el.innerHTML=`
     <h2 class="subject">${esc(m.subject)}</h2>
     <div class="meta">
@@ -423,13 +456,13 @@ function card(m,i){
     ${summary}
     <div class="actions">
       <button class="btn primary" data-a="open">Original</button>
-      <button class="btn good" data-a="imp">${m.marked_important?"Unmark important":"Mark important"}</button>
-      <button class="btn ghost" data-a="rep"${reportDisabled?' disabled title="This can never be hidden"':""}>${m.reported?"Not junk":"Report"}</button>
+      ${action}
     </div>`;
   el.querySelector('[data-a="open"]').onclick=()=>openOriginal(m);
-  el.querySelector('[data-a="imp"]').onclick=e=>act(m,el,e.currentTarget,"important");
+  const imp=el.querySelector('[data-a="imp"]');
+  if(imp) imp.onclick=e=>act(m,el,e.currentTarget,"important");
   const rep=el.querySelector('[data-a="rep"]');
-  if(!reportDisabled) rep.onclick=e=>act(m,el,e.currentTarget,"report");
+  if(rep && !reportDisabled) rep.onclick=e=>act(m,el,e.currentTarget,"report");
   return el;
 }
 
@@ -543,35 +576,101 @@ function renderDay(){
   });
 }
 
-/* ---- ask ---- */
+/* ---- ask: a conversation with the local model ----
+   CHAT is the transcript. Only {role,content} is sent to the server - the
+   sources hanging off a turn are for the page, and the model has already
+   been told what it may say about them. */
+let CHAT=[];
+const STARTERS=["What's due this week?","Any exam or quiz dates coming up?",
+                "What did I get from the placement office?"];
+
+try{ const saved=sessionStorage.getItem("mf-chat"); if(saved) CHAT=JSON.parse(saved)||[]; }catch(e){}
+function saveChat(){
+  try{ sessionStorage.setItem("mf-chat",JSON.stringify(CHAT.slice(-24))); }catch(e){}
+}
+
+/* The model writes light markdown. Escape first, then allow exactly two
+   things back in: bold, and a bullet marker. Nothing here can introduce a
+   tag, because every angle bracket was already escaped. */
+function fmtChat(text){
+  return esc(text||"")
+    .replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>")
+    .replace(/^\s*[*-]\s+/gm,"• ");
+}
+
+function srcRows(sources){
+  return (sources||[]).map((s,i)=>`
+    <div class="src" data-open="${esc(s.id)}">
+      <span class="n">${i+1}</span>
+      <span class="s">${esc(s.subject)}</span>
+      <span class="d">${esc(when(s.received_at,s.date))}</span>
+    </div>`).join("");
+}
+
+function renderChat(){
+  const box=$("#chat");
+  if(!CHAT.length){
+    box.innerHTML=`<div class="starters">
+      <div class="lead">Ask me anything about the mail in here. I answer only from
+        your own inbox, and every claim comes with the email it came from.</div>
+      <div class="row">${STARTERS.map(s=>`<button class="starter">${esc(s)}</button>`).join("")}</div>
+    </div>`;
+    box.querySelectorAll(".starter").forEach(b=>{
+      b.onclick=()=>{ $("#qq").value=b.textContent; doAsk(); };
+    });
+    return;
+  }
+  box.innerHTML=CHAT.map(t=>{
+    if(t.role==="user"){
+      return `<div class="turn me"><div class="bub me">${esc(t.content)}</div></div>`;
+    }
+    if(t.pending){
+      return `<div class="turn ai"><div class="bub ai"><div class="thinking"><i></i><i></i><i></i> Reading your mail…</div></div></div>`;
+    }
+    const rows=srcRows(t.sources);
+    return `<div class="turn ai">
+      <div class="bub ai${t.found?"":" notfound"}">${fmtChat(t.content||"No answer.")}</div>
+      ${rows
+        ? `<div class="srctitle">From these emails</div>${rows}`
+        : `<div class="hint">Nothing here was traced to an email.</div>`}
+    </div>`;
+  }).join("");
+  box.querySelectorAll("[data-open]").forEach(b=>{
+    b.onclick=()=>{ const m=MAILS.find(x=>x.id===b.dataset.open); if(m) openOriginal(m); };
+  });
+  box.scrollTop=box.scrollHeight;
+}
+
 async function doAsk(){
   const q=$("#qq").value.trim(); if(!q) return;
-  $("#askout").innerHTML=`<div class="answer"><div class="thinking"><i></i><i></i><i></i> Reading your mail…</div></div>`;
+  if($("#askbtn").disabled) return;
+  $("#qq").value="";
+  CHAT.push({role:"user",content:q});
+  CHAT.push({role:"assistant",content:"",pending:true});
+  renderChat();
   $("#askbtn").disabled=true;
   try{
+    const history=CHAT.filter(t=>!t.pending).map(t=>({role:t.role,content:t.content}));
     const r=await fetch("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({question:q})});
+      body:JSON.stringify({messages:history})});
     const d=await r.json();
-    const srcs=(d.sources||[]).map((s,i)=>`
-      <div class="src" data-open="${esc(s.id)}">
-        <span class="n">${i+1}</span>
-        <span class="s">${esc(s.subject)}</span>
-        <span class="d">${esc(when(s.received_at,s.date))}</span>
-      </div>`).join("");
-    $("#askout").innerHTML=`<div class="answer${d.found?"":" notfound"}">
-      <p>${esc(d.answer||"No answer.")}</p>
-      ${srcs?`<div class="srctitle">Answered from these emails</div>${srcs}`:""}
-      <div class="hint">${d.found
-        ? "Every claim above comes from the emails listed. Click one to read the original."
-        : "Nothing was asserted that could not be traced to an email."}</div>
-    </div>`;
-    $("#askout").querySelectorAll("[data-open]").forEach(b=>{
-      b.onclick=()=>{ const m=MAILS.find(x=>x.id===b.dataset.open); if(m) openOriginal(m); };
-    });
+    CHAT[CHAT.length-1]={role:"assistant",content:d.answer||"No answer.",
+                         sources:d.sources||[],found:!!d.found};
   }catch(err){
-    $("#askout").innerHTML=`<div class="answer notfound"><p>Could not ask: ${esc(err.message)}</p></div>`;
+    CHAT[CHAT.length-1]={role:"assistant",content:"Could not ask: "+err.message,
+                         sources:[],found:false};
   }
   $("#askbtn").disabled=false;
+  saveChat();
+  renderChat();
+  $("#qq").focus();
+}
+
+function newChat(){
+  CHAT=[];
+  try{ sessionStorage.removeItem("mf-chat"); }catch(e){}
+  renderChat();
+  $("#qq").focus();
 }
 
 /* ---- original ---- */
@@ -593,7 +692,9 @@ function closeModal(){
   setTimeout(()=>{ $("#mframe").src="about:blank"; },240);
 }
 
-/* ---- report / important ---- */
+/* ---- mark unimportant / important ----
+   The endpoint is still /api/report: the stored feedback keeps that name, and
+   renaming it would rewrite everyone's feedback.json for a label change. */
 async function act(m,el,btn,kind){
   const undo = kind==="important" ? !!m.marked_important : !!m.reported;
   btn.disabled=true;
@@ -614,7 +715,8 @@ async function act(m,el,btn,kind){
       if(!undo){ el.classList.add("leaving"); setTimeout(renderMail,280); }
       else renderMail();
       LASTACTION={m,kind};
-      showToast(undo?"Report withdrawn.":"Marked not important. The classifier will learn from this.");
+      showToast(undo?"No longer marked unimportant."
+        :"Marked unimportant. It moves to Filtered, and the classifier learns from this.");
     }
   }catch(err){
     showToast("Could not save that: "+err.message,false);
@@ -676,11 +778,49 @@ document.addEventListener("keydown",e=>{
   if(e.key==="/" && document.activeElement.tagName!=="INPUT"){ e.preventDefault(); $("#q").focus(); }
 });
 $("#askbtn").onclick=doAsk;
+$("#newchat").onclick=newChat;
 $("#qq").addEventListener("keydown",e=>{ if(e.key==="Enter") doAsk(); });
+renderChat();
 $("#prev").onclick=()=>{ CALMONTH.setMonth(CALMONTH.getMonth()-1); loadCalendar(); };
 $("#next").onclick=()=>{ CALMONTH.setMonth(CALMONTH.getMonth()+1); loadCalendar(); };
 $("#today").onclick=()=>{ CALMONTH=new Date(); SELDAY=ymd(new Date()); loadCalendar(); };
-$("#refresh").onclick=()=>{ load(); if(VIEW==="calendar") loadCalendar(); };
+$("#refresh").onclick=refreshNow;
+
+/* Refresh means "go and check Gmail", not "re-read the file". The check runs
+   on the server and can take a while, so the button spins until it reports
+   back. */
+let FETCHING=false;
+async function refreshNow(){
+  if(FETCHING) return;
+  FETCHING=true;
+  $("#refresh").classList.add("spin");
+  try{
+    const s=await (await fetch("/api/fetch",{method:"POST"})).json();
+    showToast(s.message||"Checking Gmail for new mail…",false);
+    await pollFetch();
+  }catch(err){
+    showToast("Could not check for new mail: "+err.message,false);
+    FETCHING=false; $("#refresh").classList.remove("spin");
+  }
+}
+
+async function pollFetch(){
+  let state=null;
+  while(true){
+    await new Promise(r=>setTimeout(r,1500));
+    try{
+      state=await (await fetch("/api/fetch")).json();
+    }catch(err){
+      break;   // server went away; stop spinning rather than hang forever
+    }
+    if(!state.running) break;
+  }
+  FETCHING=false;
+  $("#refresh").classList.remove("spin");
+  await load(true);
+  if(VIEW==="calendar") loadCalendar();
+  if(state) showToast(state.message||"Done.",false);
+}
 $("#theme").onclick=()=>{
   const cur=document.documentElement.getAttribute("data-theme");
   const next=cur==="dark"?"light":cur==="light"?"dark"
@@ -715,7 +855,9 @@ async function load(silent){
   }catch(err){
     $("#sub").textContent="Could not read the digest: "+err.message;
   }
-  $("#refresh").classList.remove("spin");
+  // Only the click that started it clears the spin: a background reload must
+  // not stop the wheel while a Gmail check is still running.
+  if(!silent){ $("#refresh").classList.remove("spin"); }
 }
 
 // Keep it close to live without hammering the disk: a quiet poll while the
@@ -730,6 +872,17 @@ document.addEventListener("visibilitychange",()=>{ if(!document.hidden) load(tru
 
 CALMONTH=new Date(); SELDAY=ymd(new Date());
 load();
+
+// A check started before this page was opened (or before it was reloaded) is
+// still running on the server - pick the spinner back up rather than looking
+// idle while mail is on its way in.
+fetch("/api/fetch").then(r=>r.json()).then(s=>{
+  if(s && s.running && !FETCHING){
+    FETCHING=true;
+    $("#refresh").classList.add("spin");
+    pollFetch();
+  }
+}).catch(()=>{});
 </script>
 </body>
 </html>

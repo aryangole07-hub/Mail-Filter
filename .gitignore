@@ -10,6 +10,14 @@ last_run.json
 digest_store.json
 feedback.json
 alerts_state.json
+run.lock
+# Who you are (name, campus ID, hostel room), what you told the chat that is
+# not in any mail, your calendar choices, and downloaded mail attachments.
+# All personal; none of it belongs in a public repository.
+profile.json
+user_notes.json
+calendar_overrides.json
+attachments/
 *.backup
 *.bak
 viewer.out
@@ -17,6 +25,7 @@ backfill.log
 *.tmp
 digest.log
 digest.log.1
+viewer.log
 
 # Python
 .venv/

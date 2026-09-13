@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -206,6 +207,32 @@ def model_client():
     return _CLIENT
 
 
+_CHAT_MODEL = None
+
+
+def chat_model():
+    """The best installed model for answering, not the fastest.
+
+    The digest needs speed over 150 mails; one chat answer does not. So the
+    chat takes the first model in mail_filter.CHAT_MODEL_PREFERENCE that is
+    actually pulled, which on this machine is the 26B mixture - slower per
+    answer, and better at it.
+    """
+    global _CHAT_MODEL
+    if _CHAT_MODEL:
+        return _CHAT_MODEL
+    import mail_filter
+    client, fallback = model_client()
+    installed = set(client.installed_models())
+    for wanted in mail_filter.CHAT_MODEL_PREFERENCE:
+        if wanted and (wanted in installed or wanted.split(":")[0] in installed):
+            _CHAT_MODEL = wanted
+            break
+    else:
+        _CHAT_MODEL = fallback
+    return _CHAT_MODEL
+
+
 def calendar_entries(start_date, end_date):
     """Timetable classes plus every dated thing found in mail, in one list."""
     import courses
@@ -342,6 +369,127 @@ def page():
 
 
 
+# ---------------------------------------------------------------------------
+# Fetching new mail on demand
+# ---------------------------------------------------------------------------
+#
+# Refresh used to mean "re-read the file on disk", which only ever showed what
+# the 07:55 task had already fetched. It now runs a real check against Gmail.
+# That takes seconds to minutes - Gmail, then the local model on anything new -
+# so it runs in a background thread and the page polls for the result.
+
+MAIL_FILTER = os.path.join(SCRIPT_DIR, "mail_filter.py")
+RUN_DIGEST_PS1 = os.path.join(SCRIPT_DIR, "run_digest.ps1")
+DIGEST_LOG = os.path.join(SCRIPT_DIR, "digest.log")
+FETCH_TIMEOUT = 900          # 15 minutes; a real run is far shorter
+EXIT_BUSY = 75               # mail_filter.py's "another run holds the lock"
+
+_fetch_lock = threading.Lock()
+_fetch_state = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "ok": None,
+    "message": "",
+    "new": 0,
+}
+
+
+def fetch_state():
+    with _fetch_lock:
+        return dict(_fetch_state)
+
+
+def _digest_command():
+    """How to run one digest, and whether its output goes to digest.log.
+
+    On Windows this goes through run_digest.ps1 rather than calling Python
+    directly, so an on-demand check gets the same treatment as the scheduled
+    one: UTF-8 forced, Ollama started if the machine booted without it, and
+    the run recorded in digest.log.
+    """
+    if os.name == "nt" and os.path.exists(RUN_DIGEST_PS1):
+        return (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", RUN_DIGEST_PS1], True)
+    return ([sys.executable, MAIL_FILTER], False)
+
+
+def _last_run_log():
+    """The tail of digest.log, back to the marker run_digest.ps1 writes."""
+    try:
+        with open(DIGEST_LOG, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()[-20000:]
+    except OSError:
+        return ""
+    marker = text.rfind("===== run at ")
+    return text[marker:] if marker >= 0 else text
+
+
+def _failure_message(output):
+    """The most useful line or two of a failed run, for the toast."""
+    lines = [line.strip() for line in (output or "").splitlines()]
+    lines = [line for line in lines
+             if line and not line.startswith("=====") and not line.startswith("(")]
+    if not lines:
+        return "The check failed. See digest.log for the details."
+    return " ".join(lines[-2:])[:300]
+
+
+def _fetch_worker():
+    before = len(load_store()["mails"])
+    command, logged = _digest_command()
+    env = dict(os.environ, PYTHONUTF8="1", MAIL_FILTER_NONINTERACTIVE="1")
+
+    try:
+        result = subprocess.run(
+            command, cwd=SCRIPT_DIR, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=FETCH_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        code = result.returncode
+        output = _last_run_log() if logged else (result.stdout or "") + (result.stderr or "")
+    except subprocess.TimeoutExpired:
+        code, output = -1, "The check took too long and was stopped."
+    except Exception as exc:  # noqa: BLE001 - a failed check must not kill the server
+        code, output = -1, str(exc)
+
+    added = max(0, len(load_store()["mails"]) - before)
+
+    if code == 0:
+        ok = True
+        message = ("Up to date - no new mail." if added == 0
+                   else "{} new mail.".format(added) if added == 1
+                   else "{} new mails.".format(added))
+    elif code == EXIT_BUSY:
+        # Not a failure: the scheduled run got there first and is fetching the
+        # same mail anyway.
+        ok = False
+        message = "A check is already running. Try again in a minute."
+    else:
+        ok = False
+        message = _failure_message(output)
+
+    with _fetch_lock:
+        _fetch_state.update(
+            running=False,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            ok=ok, message=message, new=added)
+
+
+def start_fetch():
+    """Start a check for new mail. Returns (started, state)."""
+    with _fetch_lock:
+        if _fetch_state["running"]:
+            return False, dict(_fetch_state)
+        _fetch_state.update(
+            running=True,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None, ok=None, new=0,
+            message="Checking Gmail for new mail...")
+        state = dict(_fetch_state)
+
+    threading.Thread(target=_fetch_worker, daemon=True).start()
+    return True, state
+
 
 # ---------------------------------------------------------------------------
 # Server
@@ -379,6 +527,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/mails":
             return self._json(200, mails_for_ui())
+
+        if path == "/api/fetch":
+            # Polled by the page while a check is running.
+            return self._json(200, fetch_state())
 
         if path == "/api/courses":
             import courses
@@ -423,6 +575,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+
+        # Routed before the body check below: Refresh sends no body.
+        if path == "/api/fetch":
+            started, state = start_fetch()
+            state["started"] = started
+            return self._json(200, state)
+
         if path not in ("/api/report", "/api/important", "/api/ask"):
             return self._json(404, {"error": "not found"})
 
@@ -457,15 +616,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "count": detail})
 
 
+MAX_CHAT_TURNS = 24  # what the page may send; qa.py trims to what it will use
+
+
 def _ask(payload):
-    """Answer a question from the store. Returns (status, body)."""
+    """Answer one turn of the chat, or a single question. Returns (status, body)."""
     import qa
 
-    question = str(payload.get("question") or "").strip()
-    if not question:
+    # The page sends the whole conversation so follow-ups work. A lone
+    # question is still accepted - that is what the one-shot Ask used to send.
+    history = payload.get("messages")
+    if isinstance(history, list):
+        history = history[-MAX_CHAT_TURNS:]
+    else:
+        question = str(payload.get("question") or "").strip()
+        if not question:
+            return 400, {"error": "expected a question"}
+        history = [{"role": "user", "content": question[:500]}]
+
+    if not qa.clean_history(history):
         return 400, {"error": "expected a question"}
-    if len(question) > 500:
-        question = question[:500]
 
     try:
         client, model = model_client()
@@ -473,8 +643,9 @@ def _ask(payload):
         return 200, {"ok": False, "sources": [],
                      "answer": "Could not reach the local model ({}).".format(exc)}
 
-    result = qa.ask(client, model, load_store()["mails"], question)
-    return 200, result
+    import mail_filter
+    return 200, qa.chat(client, chat_model(), load_store()["mails"], history,
+                        num_ctx=mail_filter.CHAT_NUM_CTX)
 
 
 def free_port(preferred):

@@ -87,11 +87,53 @@ crontab -e
 55 7 * * * cd /path/to/mail_filter && PYTHONUTF8=1 MAIL_FILTER_NONINTERACTIVE=1 ./.venv/bin/python mail_filter.py >> digest.log 2>&1
 ```
 
+## 6. Opening at startup, and reminders that wait for you
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1
+```
+
+Run once, no admin needed. It sets up four things, all for the current user:
+
+- **`MailFilterViewer`** — a Task Scheduler job that fires 30 seconds after
+  you sign in and runs `run_viewer.ps1`, so your mail is already open and
+  waiting when you get to the desk. If the window is somehow open already it
+  is focused rather than duplicated.
+- **The notification identity** — reminders are labelled *Mail Filter* and get
+  their own entry in Settings › System › Notifications. Windows refuses to
+  show a toast from an unregistered app, so this is required, not decoration.
+- **The `mailfilter:` protocol** — what the **Open Mail Filter** button on a
+  reminder activates.
+- **A Start-menu shortcut**, for opening it by hand.
+
+Reminders are sent by `notify.ps1` using Windows' **reminder** toast scenario:
+the notification stays on screen until you click it away, instead of fading
+after five seconds and taking the reminder with it. Two things keep that
+working, so don't remove either — a reminder toast must carry at least one
+button (Windows quietly downgrades a button-less one to an ordinary fading
+toast), and it must be sent under a registered AppUserModelID. Both are
+covered by tests. On a machine where the toast platform is unavailable it
+falls back to an old tray balloon, which does fade; `alerts.py` prints a line
+saying so rather than pretending the reminder was sticky.
+
+Undo all of it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1 -Uninstall
+```
+
+That leaves the digest and reminder tasks alone.
+
 ## The viewer
 
 ```powershell
-.iew.ps1
+.\run_viewer.ps1
 ```
+
+Opens Mail Filter as its own desktop window - no address bar, its own
+taskbar button - and starts the local server behind it if it is not
+already running. (`.\view.ps1` does the same in a console plus a browser
+tab, if you prefer that.)
 
 Opens a local website at `http://127.0.0.1:8765/` showing every mail worth
 your attention: the subject as a heading, an AI summary underneath, and two
@@ -102,14 +144,62 @@ buttons.
   access, and remote images stay blocked until you click **Load images** -
   most remote images in email are tracking pixels that tell the sender when
   you opened it.
-- **Report** marks a mail as not important. That feeds back into the
-  classifier: reported senders are passed to the model as guidance on the next
-  run, and they are the one thing allowed to override the never-hide rules
-  below. Every report can be undone.
+- **Mark unimportant** pushes a mail down into Filtered. That feeds back into
+  the classifier: those senders are passed to the model as guidance on the
+  next run, and they are the one thing allowed to override the never-hide
+  rules below - including the college-domain rule, so it is how you get rid of
+  a college mailing list you genuinely do not want. Every one can be undone.
+
+Each card carries exactly one of those two actions, whichever fits where the
+card is: mail being shown gets **Mark unimportant**, mail in Filtered gets
+**Mark important**, and a mail you have already pinned gets **Unmark
+important**. Mail that can never be hidden (anything about marks or grades)
+shows the button disabled rather than hiding it, so the rule is visible
+instead of mysterious.
 
 There is also a **Filtered** tab. Mail the classifier hid is still listed
 there, so nothing is ever actually invisible - a wrong Ignore costs you one
 click, not a missed email.
+
+The **⟳ Refresh** button checks Gmail for real: it runs a full digest (fetch,
+classify, extract dates) and then reloads the page, so you are not stuck
+looking at whatever the 07:55 task last found. It takes anywhere from a few
+seconds to a couple of minutes depending on how much new mail there is - the
+button spins until it is done, then a toast says how many arrived, or what
+went wrong. On Windows it goes through `run_digest.ps1`, so an on-demand check
+starts Ollama if it is not running and is recorded in `digest.log` like any
+other run.
+
+Only one digest runs at a time. A `run.lock` file keeps a Refresh and the
+07:55 task from fetching and classifying the same mail twice over each other;
+whichever is second exits with code 75 and says so instead of racing.
+
+## Ask - a chat with your own inbox
+
+The **Ask** tab is a conversation with `gemma3:4b` running locally on this
+machine. It remembers the last few turns, so follow-ups work: ask *"when is my
+next quiz?"*, then *"who sent that?"*, and the second question is answered
+from the mail the first one was about rather than from whatever else happens
+to contain the word "sent".
+
+What it will not do is make something up:
+
+- the model only ever sees mail from your own store, handed to it as numbered
+  blocks - it has no other source;
+- the schema makes it cite the numbers it used, and **an answer that claims to
+  have read your mail but cites nothing is thrown away**, not shown;
+- every citation is mapped back to a real message and listed under the reply,
+  so the original is one click away.
+
+It is allowed to be sociable - a greeting gets a greeting - but a turn where
+no mail matched is told, in that turn, that it may state nothing as fact, and
+the reply is labelled "Nothing here was traced to an email" in the page. That
+label is the honest one to read: prose without sources under it is chat, not
+evidence.
+
+The conversation lives in the page (and in `sessionStorage`), never on disk -
+**New chat** clears it. Nothing about any of this leaves the machine: the mail
+and the model are both local.
 
 The server binds to `127.0.0.1`, so the site is reachable only from this
 computer. Your mail is never uploaded anywhere.

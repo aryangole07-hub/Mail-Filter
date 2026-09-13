@@ -323,6 +323,17 @@ class Installer:
         self.log("  Scheduled." if alert.returncode == 0
                  else "  Could not add the reminder task.")
 
+        # Open at logon, name the notifications, and register mailfilter: so
+        # the button on a reminder opens the app window.
+        self.log("Setting it to open when the PC starts...")
+        autostart = run([
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            os.path.join(INSTALL_DIR, "install_autostart.ps1"),
+        ])
+        self.log("  Done." if autostart.returncode == 0
+                 else "  Could not set it to open at startup; the desktop "
+                      "shortcut still works.")
+
     def make_shortcut(self):
         if DRY_RUN:
             return
@@ -331,12 +342,17 @@ class Installer:
             if not os.path.isdir(desktop):
                 return
             target = os.path.join(desktop, "Mail Filter.lnk")
+            # run_viewer.ps1, not view.ps1: it opens the app window rather
+            # than a console plus a browser tab, and reuses the window and
+            # the server if they are already up.
             ps = (
                 "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');"
                 "$s.TargetPath='powershell';"
-                "$s.Arguments='-NoProfile -ExecutionPolicy Bypass -File \"{}\"';"
+                "$s.Arguments='-NoProfile -WindowStyle Hidden "
+                "-ExecutionPolicy Bypass -File \"{}\" -Quiet';"
+                "$s.WindowStyle=7;"
                 "$s.WorkingDirectory='{}';$s.Save()"
-            ).format(target, os.path.join(INSTALL_DIR, "view.ps1"), INSTALL_DIR)
+            ).format(target, os.path.join(INSTALL_DIR, "run_viewer.ps1"), INSTALL_DIR)
             run(["powershell", "-NoProfile", "-Command", ps])
             self.log("  Desktop shortcut created.")
         except Exception:  # noqa: BLE001 - a shortcut is a nicety
