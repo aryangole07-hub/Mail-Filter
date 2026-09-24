@@ -27,6 +27,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 
+# Trust the Windows certificate store, not just certifi's bundle. The campus
+# network re-signs HTTPS with its own CA; browsers accept it, but plain certifi
+# failed every 07:55 run from 2026-09-22 with "self-signed certificate in
+# certificate chain", so no mail arrived for days.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials

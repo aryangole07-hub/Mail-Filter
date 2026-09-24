@@ -989,3 +989,22 @@ Prompt: add a friend's BITS email to the Google OAuth test users.
 - Showed the user where the Mac zip is:
   `Downloads\Mail Filter - send to friends\MailFilter-mac.zip`
   (a copy of `dist\MailFilter-mac.zip`).
+
+---
+
+## 2026-09-24 — "only showing mail from 4 days ago"
+
+- **Cause:** every 07:55 run from 2026-09-22 died at the OAuth token refresh
+  with `CERTIFICATE_VERIFY_FAILED ... self-signed certificate in certificate
+  chain`. The network was re-signing HTTPS with its own CA. Python's certifi
+  bundle doesn't include that CA; browsers use the Windows store, so they
+  worked. `last_run.json` stayed at 2026-09-21, so the viewer kept showing old
+  mail.
+- **Fix:** `mail_filter.py` calls `truststore.inject_into_ssl()` at import, so
+  Python trusts the Windows certificate store. `truststore` is now in
+  requirements (it was already in the venv).
+- A manual Refresh at 15:25 got through auth and backfilled the missing days.
+- **Separate warning:** an Ollama update put the GPU backends (cuda_v12,
+  cuda_v13, rocm_v7_1, vulkan) back in `lib\ollama`. The Claude Code GPU guard
+  blocks model commands until they are moved back to `..\gpu-backends-disabled`.
+  Only the user can do that.

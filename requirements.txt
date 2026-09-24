@@ -8,3 +8,4 @@ openpyxl
 xlrd
 pypdf
 python-docx
+truststore>=0.10
