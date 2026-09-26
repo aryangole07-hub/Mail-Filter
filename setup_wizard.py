@@ -459,6 +459,15 @@ class Installer:
                                os.path.join(INSTALL_DIR, script))])
                 if out.returncode != 0:
                     self.log("  Could not schedule {}; the app still works when opened.".format(name))
+                    continue
+                # schtasks /Create leaves Windows' defaults: never run a missed
+                # time later, and never start on battery. On a laptop that is
+                # shut or unplugged at 7:55 that silently skips the whole day.
+                # A catch-up run can also take well over half an hour.
+                run(["powershell", "-NoProfile", "-Command",
+                     "Set-ScheduledTask -TaskName '{}' -Settings (New-ScheduledTaskSettingsSet "
+                     "-StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+                     "-ExecutionTimeLimit ([TimeSpan]::FromHours(3))) | Out-Null".format(name)])
             autostart = run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                              os.path.join(INSTALL_DIR, "install_autostart.ps1")])
             self.log("  Done." if autostart.returncode == 0

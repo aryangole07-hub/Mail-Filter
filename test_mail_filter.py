@@ -11,6 +11,7 @@ import io
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -2747,9 +2748,58 @@ check("the lock file is gone once released", not os.path.exists(m.LOCK_FILE))
 check("the next run can take it again", m.acquire_run_lock() is True)
 _old = _time.time() - m.LOCK_STALE_SECONDS - 60
 os.utime(m.LOCK_FILE, (_old, _old))
+# The lock holds this process's PID, which is alive: a long catch-up run.
+check("a run past 30 minutes that is still going keeps its lock",
+      m.acquire_run_lock() is False)
+_dead = subprocess.Popen([sys.executable, "-c", "pass"])
+_dead.wait()
+with open(m.LOCK_FILE, "w", encoding="utf-8") as _fh:
+    json.dump({"pid": _dead.pid}, _fh)
+os.utime(m.LOCK_FILE, (_old, _old))
 check("a lock left by a crashed run does not wedge every run after it",
       m.acquire_run_lock() is True)
+_ancient = _time.time() - m.LOCK_MAX_SECONDS - 60
+os.utime(m.LOCK_FILE, (_ancient, _ancient))
+check("a lock older than the cap is taken over even if its PID was reused",
+      m.acquire_run_lock() is True)
+with open(m.LOCK_FILE, "w", encoding="utf-8") as _fh:
+    json.dump({"pid": _dead.pid}, _fh)
 m.release_run_lock()
+check("a run never deletes a lock another run took over",
+      os.path.exists(m.LOCK_FILE))
+os.remove(m.LOCK_FILE)
+check("an unknown PID is not treated as running", m._pid_alive(None) is False)
+
+# 07:55 with no Wi-Fi yet (or a flaky HTTPS-inspecting network) must not cost
+# the whole day: retry, then fail in one line.
+_real_gs, _real_fes, _real_delays = (m.get_gmail_service, m.fetch_emails_since,
+                                     m.NETWORK_RETRY_SECONDS)
+_tries = []
+def _flaky_service():
+    _tries.append(1)
+    if len(_tries) < 3:
+        raise OSError("certificate verify failed")
+    return "svc"
+try:
+    m.NETWORK_RETRY_SECONDS = [0, 0, 0]
+    m.get_gmail_service = _flaky_service
+    m.fetch_emails_since = lambda svc, since, max_results: ([svc], True)
+    _got = m._fetch_with_network_retry(datetime.now(timezone.utc), 10)
+    check("a network blip at fetch time is retried, not fatal",
+          _got == (["svc"], True) and len(_tries) == 3)
+    def _offline():
+        raise OSError("no route to host")
+    m.get_gmail_service = _offline
+    try:
+        m._fetch_with_network_retry(datetime.now(timezone.utc), 10)
+        _exit = None
+    except SystemExit as exc:
+        _exit = str(exc)
+    check("staying offline ends in one readable line, not a traceback",
+          _exit is not None and "Could not reach Gmail" in _exit, _exit)
+finally:
+    m.get_gmail_service, m.fetch_emails_since, m.NETWORK_RETRY_SECONDS = (
+        _real_gs, _real_fes, _real_delays)
 check("the viewer and the digest agree on what 'busy' means",
       v.EXIT_BUSY == m.EXIT_BUSY)
 

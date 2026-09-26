@@ -1008,3 +1008,33 @@ Prompt: add a friend's BITS email to the Google OAuth test users.
   cuda_v13, rocm_v7_1, vulkan) back in `lib\ollama`. The Claude Code GPU guard
   blocks model commands until they are moved back to `..\gpu-backends-disabled`.
   Only the user can do that.
+
+---
+
+## 2026-09-26 — bug hunt
+
+Sep 25 and 26 runs at 07:55 succeeded (the certificate fix held). Fixed:
+
+1. **Viewer Refresh timed out at 15 min** (`FETCH_TIMEOUT`), but the Sep 24
+   catch-up took 36. It reported "took too long" while Python kept running
+   (killing the PowerShell wrapper leaves the child alive). Now 3 h, and on
+   timeout `_stop_digest_run()` kills the process tree that holds `run.lock`.
+2. **Run lock went stale at 30 min even while the run was alive.** A second
+   run could start alongside a long one, and the first run's
+   `release_run_lock` then deleted the second's lock. Now an old lock counts
+   as abandoned only if its PID is dead (`_pid_alive`, ctypes on Windows,
+   because `os.kill(pid, 0)` terminates there), with a 6 h hard cap
+   (`LOCK_MAX_SECONDS`). A run only removes a lock that carries its own PID.
+3. **One network failure cost the whole day.** Gmail auth + fetch are
+   retried after 30/60/120 s (`_fetch_with_network_retry`), then the run fails
+   with one line ("Could not reach Gmail after 4 tries ...") instead of a page
+   of traceback. The marker is untouched.
+4. **Scheduled task settings.** `MailFilterDigest` was capped at 30 min. The
+   setup wizard's `schtasks /Create` left Windows' defaults: no run-if-missed,
+   and no start on battery, so a friend's laptop that is shut or unplugged at
+   07:55 skipped the day. The wizard now applies StartWhenAvailable +
+   battery-OK + 3 h limit. Both live tasks on this PC were updated the same way.
+
+New tests cover the lock and the retry. **The suite has NOT been run yet:** the
+GPU guard hook blocks every Python command until the Ollama GPU backends are
+moved out of `lib\ollama` again.

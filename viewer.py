@@ -387,7 +387,10 @@ def page():
 MAIL_FILTER = os.path.join(SCRIPT_DIR, "mail_filter.py")
 RUN_DIGEST_PS1 = os.path.join(SCRIPT_DIR, "run_digest.ps1")
 DIGEST_LOG = os.path.join(SCRIPT_DIR, "digest.log")
-FETCH_TIMEOUT = 900          # 15 minutes; a real run is far shorter
+# A normal day takes minutes, but catching up after a few missed days runs
+# on the CPU for well over 15 minutes (36 on 2026-09-24). The old 15-minute
+# limit reported those as failed while the run carried on regardless.
+FETCH_TIMEOUT = 3 * 60 * 60
 EXIT_BUSY = 75               # mail_filter.py's "another run holds the lock"
 
 _fetch_lock = threading.Lock()
@@ -446,6 +449,23 @@ def _failure_message(output):
     return " ".join(lines[-2:])[:300]
 
 
+def _stop_digest_run():
+    """Kill the digest process recorded in run.lock, if it is still alive."""
+    try:
+        import mail_filter
+        pid = mail_filter._lock_owner()
+        if not mail_filter._pid_alive(pid):
+            return
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.kill(pid, 15)
+    except Exception:  # noqa: BLE001 - best effort; the lock goes stale anyway
+        pass
+
+
 def _fetch_worker():
     before = len(load_store()["mails"])
     command, logged = _digest_command()
@@ -459,6 +479,9 @@ def _fetch_worker():
         code = result.returncode
         output = _last_run_log() if logged else (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired:
+        # Killing the wrapper leaves its Python child running and holding the
+        # lock, so stop the run that owns the lock as well.
+        _stop_digest_run()
         code, output = -1, "The check took too long and was stopped."
     except Exception as exc:  # noqa: BLE001 - a failed check must not kill the server
         code, output = -1, str(exc)

@@ -75,6 +75,10 @@ FEEDBACK_FILE = os.path.join(SCRIPT_DIR, "feedback.json")
 # other writing the store - so the second one is turned away instead.
 LOCK_FILE = os.path.join(SCRIPT_DIR, "run.lock")
 LOCK_STALE_SECONDS = 30 * 60
+# A catch-up after a few missed days runs well past 30 minutes on the CPU (the
+# 2026-09-24 one took 36), so an old lock only counts as abandoned once the run
+# that wrote it has exited. This cap covers a reused PID.
+LOCK_MAX_SECONDS = 6 * 60 * 60
 EXIT_BUSY = 75  # distinct, so callers can say "busy" rather than "failed"
 
 # Mail from the institution is never hidden. This is the single biggest reason
@@ -2022,8 +2026,7 @@ def main():
         since_dt = load_last_run(default_hours=args.hours)
     run_started_at = datetime.now(timezone.utc)
 
-    gmail = get_gmail_service()
-    emails, complete = fetch_emails_since(gmail, since_dt, max_results=args.max)
+    emails, complete = _fetch_with_network_retry(since_dt, args.max)
 
     # One rule, applied in both places below: the marker only moves when every
     # message in the window was actually read. Anything else risks marking
@@ -2141,6 +2144,50 @@ def main():
             "alone. The next run will re-read this window.",
             file=sys.stderr,
         )
+
+
+NETWORK_RETRY_SECONDS = [30, 60, 120]
+
+
+def _network_errors():
+    """Exception types meaning "could not reach Google", not "Google said no"."""
+    from google.auth.exceptions import TransportError
+    kinds = [TransportError, OSError]  # OSError covers socket and SSL errors
+    try:
+        import httplib2
+        kinds.append(httplib2.HttpLib2Error)  # e.g. ServerNotFoundError
+    except ImportError:
+        pass
+    return tuple(kinds)
+
+
+def _fetch_with_network_retry(since_dt, max_results):
+    """get_gmail_service + fetch_emails_since, retried while offline.
+
+    At 07:55 a laptop that has just woken up often has no Wi-Fi yet, and a
+    network that inspects HTTPS can fail the first handshake. One failure used
+    to cost the whole day (the next try was the next morning), and it was
+    logged as a page of traceback. Now it waits and retries, then fails in one
+    readable line. The last-run marker is untouched either way.
+    """
+    errors = _network_errors()
+    attempts = len(NETWORK_RETRY_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            gmail = get_gmail_service()
+            return fetch_emails_since(gmail, since_dt, max_results=max_results)
+        except errors as exc:
+            if attempt == attempts - 1:
+                sys.exit(
+                    f"Could not reach Gmail after {attempts} tries "
+                    f"({_describe(exc)}). Check the internet connection; the "
+                    "next run will pick up everything since the last good one."
+                )
+            delay = NETWORK_RETRY_SECONDS[attempt]
+            print(f"Could not reach Gmail ({_describe(exc)}); retrying in "
+                  f"{delay}s (attempt {attempt + 2} of {attempts})...",
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def backfill_attachments(limit_days=60):
@@ -2293,6 +2340,8 @@ def acquire_run_lock():
                 return False
             if age < LOCK_STALE_SECONDS:
                 return False
+            if age < LOCK_MAX_SECONDS and _pid_alive(_lock_owner()):
+                return False  # a long run, not a dead one
             try:
                 os.remove(LOCK_FILE)
             except OSError:
@@ -2309,7 +2358,55 @@ def acquire_run_lock():
     return False
 
 
+def _lock_owner():
+    """The PID recorded in the lock file, or None."""
+    try:
+        with open(LOCK_FILE, encoding="utf-8") as fh:
+            return int(json.load(fh).get("pid"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _pid_alive(pid):
+    """Whether a process with this PID is still running. None -> False."""
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) would *terminate* the process on Windows.
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def release_run_lock():
+    # Only remove our own lock. If ours was judged abandoned and another run
+    # took over, deleting theirs would let a third run start alongside it.
+    owner = _lock_owner()
+    if owner is not None and owner != os.getpid():
+        return
     try:
         os.remove(LOCK_FILE)
     except OSError:
